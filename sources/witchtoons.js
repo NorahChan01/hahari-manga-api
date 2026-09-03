@@ -12,7 +12,8 @@ const HEADERS = {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
         "(KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
     "Accept":
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "text/html,application/xhtml+xml,application/xml;q=0.9," +
+        "image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
     "Cache-Control": "no-cache",
     "Pragma": "no-cache"
@@ -20,8 +21,10 @@ const HEADERS = {
 
 function cleanText(value) {
     return String(value || "")
-        .replace(/\\u003c/g, "<")
-        .replace(/\\u003e/g, ">")
+        .replace(/\\u003c/gi, "<")
+        .replace(/\\u003e/gi, ">")
+        .replace(/\\u002f/gi, "/")
+        .replace(/\\u0026/gi, "&")
         .replace(/\\"/g, '"')
         .replace(/\\n/g, " ")
         .replace(/\\r/g, " ")
@@ -30,16 +33,16 @@ function cleanText(value) {
         .trim();
 }
 
-function normalizeTitle(title) {
-    return cleanText(title)
+function normalizeTitle(value) {
+    return cleanText(value)
         .toLowerCase()
         .replace(/[^\p{L}\p{N}]+/gu, " ")
         .replace(/\s+/g, " ")
         .trim();
 }
 
-function slugify(title) {
-    return normalizeTitle(title)
+function slugify(value) {
+    return normalizeTitle(value)
         .replace(/\s+/g, "-")
         .replace(/^-+|-+$/g, "");
 }
@@ -47,13 +50,7 @@ function slugify(title) {
 function absoluteUrl(url) {
     if (!url) return null;
 
-    url = String(url)
-        .replace(/\\u0026/g, "&")
-        .replace(/\\\//g, "/")
-        .replace(/&amp;/g, "&")
-        .trim();
-
-    if (!url) return null;
+    url = cleanText(url);
 
     if (url.startsWith("//")) {
         return "https:" + url;
@@ -74,233 +71,76 @@ async function request(url) {
     const response = await axios.get(url, {
         httpsAgent: agent,
         headers: HEADERS,
-        timeout: 25000,
+        timeout: 30000,
         maxRedirects: 5,
-        validateStatus: status => status >= 200 && status < 400
+        validateStatus: status =>
+            status >= 200 && status < 400
     });
 
     return {
         html: String(response.data || ""),
-        url: response.request?.res?.responseUrl || url
+        finalUrl:
+            response.request?.res?.responseUrl || url
     };
 }
 
-function extractLinks(html) {
-    const links = [];
-    const seen = new Set();
+function decodeRSC(html) {
+    let out = String(html || "");
 
-    const patterns = [
-        /href\s*=\s*"([^"]+)"/gi,
-        /href\s*=\s*'([^']+)'/gi,
-        /\\"href\\"\s*:\s*\\"([^"]+)\\"/gi,
-        /"url"\s*:\s*"([^"]+)"/gi
+    const replacements = [
+        [/\\u002F/gi, "/"],
+        [/\\u002f/gi, "/"],
+        [/\\u002D/gi, "-"],
+        [/\\u002d/gi, "-"],
+        [/\\u003C/gi, "<"],
+        [/\\u003c/gi, "<"],
+        [/\\u003E/gi, ">"],
+        [/\\u003e/gi, ">"],
+        [/\\u0026/gi, "&"],
+        [/\\u0026/gi, "&"],
+        [/\\u003F/gi, "?"],
+        [/\\u003f/gi, "?"],
+        [/\\u003D/gi, "="],
+        [/\\u003d/gi, "="],
+        [/\\"/g, '"']
     ];
 
-    for (const regex of patterns) {
-        let match;
-
-        while ((match = regex.exec(html))) {
-            const url = absoluteUrl(match[1]);
-
-            if (!url) continue;
-            if (!url.startsWith(BASE_URL)) continue;
-
-            if (!seen.has(url)) {
-                seen.add(url);
-                links.push(url);
-            }
-        }
+    for (const [regex, replacement] of replacements) {
+        out = out.replace(regex, replacement);
     }
 
-    return links;
+    return out;
 }
 
-function extractImages(html) {
-    const images = [];
-    const seen = new Set();
+function extractTitle(html, fallback) {
+    const decoded = decodeRSC(html);
 
     const patterns = [
-        /<img[^>]+src=["']([^"']+)["']/gi,
-        /<img[^>]+data-src=["']([^"']+)["']/gi,
-        /<img[^>]+data-lazy-src=["']([^"']+)["']/gi,
-        /"src"\s*:\s*"([^"]+\.(?:jpg|jpeg|png|webp|avif)(?:\?[^"]*)?)"/gi,
-        /\\"src\\"\s*:\s*\\"([^"]+\.(?:jpg|jpeg|png|webp|avif)(?:\?[^"]*)?)\\"/gi
-    ];
+        /<h1[^>]*>\s*([^<]+?)\s*<\/h1>/i,
 
-    for (const regex of patterns) {
-        let match;
+        /<title[^>]*>\s*([^<]+?)\s*<\/title>/i,
 
-        while ((match = regex.exec(html))) {
-            let url = absoluteUrl(match[1]);
+        /"title"\s*:\s*"([^"]+)"/i,
 
-            if (!url) {
-                url = match[1];
-            }
-
-            if (!url) continue;
-
-            url = url.replace(/\\u0026/g, "&");
-
-            if (
-                !/\.(jpg|jpeg|png|webp|avif)(?:[?#].*)?$/i.test(url)
-            ) {
-                continue;
-            }
-
-            /*
-             * Skip obvious covers/thumbnails.
-             */
-            if (
-                /\/covers?\//i.test(url) ||
-                /\/thumbnail/i.test(url) ||
-                /\/thumbs?\//i.test(url)
-            ) {
-                continue;
-            }
-
-            if (!seen.has(url)) {
-                seen.add(url);
-                images.push(url);
-            }
-        }
-    }
-
-    return images;
-}
-
-function extractChapterNumber(value) {
-    if (!value) return null;
-
-    const text = decodeURIComponent(
-        String(value)
-            .replace(/\\u002F/g, "/")
-            .replace(/\\u002D/g, "-")
-    );
-
-    const patterns = [
-        /\/chapter\/(\d+(?:\.\d+)?)/i,
-        /chapter[-_ ]?(\d+(?:\.\d+)?)/i,
-        /\bch(?:apter)?\.?\s*(\d+(?:\.\d+)?)\b/i
-    ];
-
-    for (const regex of patterns) {
-        const match = text.match(regex);
-
-        if (match) {
-            return String(match[1]);
-        }
-    }
-
-    return null;
-}
-
-function chaptersEqual(a, b) {
-    const x = parseFloat(String(a));
-    const y = parseFloat(String(b));
-
-    if (!Number.isNaN(x) && !Number.isNaN(y)) {
-        return Math.abs(x - y) < 0.00001;
-    }
-
-    return String(a).trim() === String(b).trim();
-}
-
-function scoreTitle(found, wanted) {
-    const a = normalizeTitle(found);
-    const b = normalizeTitle(wanted);
-
-    if (!a || !b) return 0;
-
-    if (a === b) return 100;
-
-    if (a.includes(b) || b.includes(a)) {
-        return 70;
-    }
-
-    const aWords = new Set(a.split(" "));
-    const bWords = new Set(b.split(" "));
-
-    let common = 0;
-
-    for (const word of bWords) {
-        if (aWords.has(word)) {
-            common++;
-        }
-    }
-
-    return common * 10;
-}
-
-function extractSeriesCandidates(html) {
-    const candidates = [];
-    const seen = new Set();
-
-    const regexes = [
-        /href\s*=\s*["'](\/series\/comic\/[^"'?#]+)["']/gi,
-        /\\"href\\"\s*:\s*\\"(\/series\/comic\/[^"\\?#]+)\\"/gi,
-        /https:\/\/witchtoons\.net\/series\/comic\/[A-Za-z0-9._~!$&'()*+,;=:@%/-]+/gi
-    ];
-
-    for (const regex of regexes) {
-        let match;
-
-        while ((match = regex.exec(html))) {
-            const raw = match[1] || match[0];
-
-            const url = absoluteUrl(
-                raw
-                    .replace(/\\"/g, "")
-                    .replace(/\\u002F/g, "/")
-            );
-
-            if (!url) continue;
-
-            const cleanUrl = url.split("?")[0].split("#")[0];
-
-            /*
-             * Only series/comic/<slug>
-             */
-            const matchSlug = cleanUrl.match(
-                /^https:\/\/witchtoons\.net\/series\/comic\/([^/]+)\/?$/i
-            );
-
-            if (!matchSlug) continue;
-
-            if (seen.has(cleanUrl)) continue;
-
-            seen.add(cleanUrl);
-
-            candidates.push({
-                url: cleanUrl,
-                slug: matchSlug[1]
-            });
-        }
-    }
-
-    return candidates;
-}
-
-function extractSeriesTitle(html, fallbackTitle) {
-    const patterns = [
-        /<h1[^>]*>([\s\S]*?)<\/h1>/i,
-        /<title[^>]*>([\s\S]*?)<\/title>/i,
         /"name"\s*:\s*"([^"]+)"/i,
+
+        /\\"title\\"\s*:\s*\\"([^"\\]+)\\"/i,
+
         /\\"name\\"\s*:\s*\\"([^"\\]+)\\"/i
     ];
 
     for (const regex of patterns) {
-        const match = html.match(regex);
+        const match =
+            decoded.match(regex) ||
+            html.match(regex);
 
         if (!match) continue;
 
-        let title = cleanText(
-            match[1]
-                .replace(/<[^>]+>/g, " ")
-                .replace(/&amp;/g, "&")
-        );
+        let title = cleanText(match[1]);
 
         title = title
             .replace(/\s*\|\s*WitchToons.*$/i, "")
+            .replace(/\s*-\s*WitchToons.*$/i, "")
             .trim();
 
         if (
@@ -312,323 +152,170 @@ function extractSeriesTitle(html, fallbackTitle) {
         }
     }
 
-    return fallbackTitle;
+    return fallback;
 }
 
-function extractChapterLinks(html) {
-    const chapters = [];
-    const seen = new Set();
+function chapterNumber(value) {
+    if (!value) return null;
+
+    const text = decodeURIComponent(
+        String(value)
+            .replace(/\\u002F/gi, "/")
+            .replace(/\\u002D/gi, "-")
+    );
 
     const patterns = [
-        /href\s*=\s*["'](\/series\/comic\/[^"'?#]+\/chapter\/[^"'?#]+)["']/gi,
-        /\\"href\\"\s*:\s*\\"(\/series\/comic\/[^"\\?#]+\/chapter\/[^"\\?#]+)\\"/gi,
-        /https:\/\/witchtoons\.net\/series\/comic\/[^"'\\\s]+\/chapter\/[^"'\\\s]+/gi
+        /\/chapter\/(\d+(?:\.\d+)?)/i,
+        /chapter[-_ ](\d+(?:\.\d+)?)/i,
+        /\bchapter\s*(\d+(?:\.\d+)?)\b/i,
+        /\bch\.?\s*(\d+(?:\.\d+)?)\b/i
     ];
 
     for (const regex of patterns) {
-        let match;
+        const match = text.match(regex);
 
-        while ((match = regex.exec(html))) {
-            const raw = match[1] || match[0];
-
-            const url = absoluteUrl(
-                raw
-                    .replace(/\\"/g, "")
-                    .replace(/\\u002F/g, "/")
-            );
-
-            if (!url) continue;
-
-            const cleanUrl = url.split("?")[0].split("#")[0];
-
-            const chapter = extractChapterNumber(cleanUrl);
-
-            if (chapter === null) continue;
-
-            if (seen.has(cleanUrl)) continue;
-
-            seen.add(cleanUrl);
-
-            chapters.push({
-                url: cleanUrl,
-                chapter
-            });
+        if (match) {
+            return match[1];
         }
-    }
-
-    return chapters;
-}
-
-/*
- * WitchToons puts useful series/chapter information in
- * Next.js React Server Component payloads.
-
- * This function extracts escaped JSON-like strings from
- * that payload and turns them back into normal HTML/text.
- */
-function decodeRscPayload(html) {
-    let result = html;
-
-    const replacements = [
-        [/\\u002F/g, "/"],
-        [/\\u002D/g, "-"],
-        [/\\u003C/g, "<"],
-        [/\\u003E/g, ">"],
-        [/\\u0026/g, "&"],
-        [/\\u003F/g, "?"],
-        [/\\u003D/g, "="],
-        [/\\u0025/g, "%"],
-        [/\\"/g, '"'],
-        [/\\\\/g, "\\"]
-    ];
-
-    for (const [regex, replacement] of replacements) {
-        result = result.replace(regex, replacement);
-    }
-
-    return result;
-}
-
-async function searchManga(title) {
-    const wantedTitle = cleanText(title);
-
-    if (!wantedTitle) {
-        return null;
-    }
-
-    const query = encodeURIComponent(wantedTitle);
-
-    const searchUrls = [
-        `${BASE_URL}/series?search=${query}`,
-        `${BASE_URL}/series?keyword=${query}`,
-        `${BASE_URL}/search?keyword=${query}`,
-        `${BASE_URL}/search?q=${query}`
-    ];
-
-    let best = null;
-    let bestScore = 0;
-
-    for (const searchUrl of searchUrls) {
-        try {
-            const { html } = await request(searchUrl);
-
-            const decoded = decodeRscPayload(html);
-
-            const candidates = extractSeriesCandidates(
-                html + "\n" + decoded
-            );
-
-            for (const candidate of candidates) {
-                let candidateTitle = candidate.slug
-                    .replace(/[-_]+/g, " ")
-                    .trim();
-
-                /*
-                 * Open the series page to get the real title.
-                 */
-                try {
-                    const page = await request(candidate.url);
-
-                    candidateTitle = extractSeriesTitle(
-                        page.html,
-                        candidateTitle
-                    );
-                } catch (_) {}
-
-                const score = scoreTitle(
-                    candidateTitle,
-                    wantedTitle
-                );
-
-                if (score > bestScore) {
-                    bestScore = score;
-
-                    best = {
-                        url: candidate.url,
-                        title: candidateTitle
-                    };
-                }
-            }
-
-            /*
-             * Exact match is good enough.
-             */
-            if (bestScore >= 100) {
-                return best;
-            }
-        } catch (_) {}
-    }
-
-    /*
-     * Direct slug fallback.
-     */
-    const fallbackSlug = slugify(wantedTitle);
-
-    const fallbackUrls = [
-        `${BASE_URL}/series/comic/${fallbackSlug}`,
-        `${BASE_URL}/series/comic/${encodeURIComponent(fallbackSlug)}`
-    ];
-
-    for (const url of fallbackUrls) {
-        try {
-            const page = await request(url);
-
-            if (
-                page.html &&
-                page.html.length > 1000 &&
-                !/404|not found/i.test(page.html)
-            ) {
-                const realTitle = extractSeriesTitle(
-                    page.html,
-                    wantedTitle
-                );
-
-                return {
-                    url,
-                    title: realTitle || wantedTitle
-                };
-            }
-        } catch (_) {}
-    }
-
-    return best;
-}
-
-async function findChapterFromSeriesPage(
-    seriesHtml,
-    seriesUrl,
-    wantedChapter
-) {
-    const decoded = decodeRscPayload(seriesHtml);
-
-    const combined = seriesHtml + "\n" + decoded;
-
-    const chapters = extractChapterLinks(combined);
-
-    /*
-     * First: exact requested chapter.
-     */
-    for (const item of chapters) {
-        if (chaptersEqual(item.chapter, wantedChapter)) {
-            return item.url;
-        }
-    }
-
-    /*
-     * Sometimes the requested chapter is present as
-     * escaped RSC data but not as a normal href.
-     */
-    const escapedChapterRegexes = [
-        new RegExp(
-            `/series/comic/[^"\\\\]+/chapter/${String(wantedChapter).replace(".", "\\.")}`,
-            "gi"
-        ),
-        new RegExp(
-            `chapter[-_]${String(wantedChapter).replace(".", "\\.")}`,
-            "gi"
-        )
-    ];
-
-    for (const regex of escapedChapterRegexes) {
-        const match = combined.match(regex);
-
-        if (!match) continue;
-
-        let path = match[0]
-            .replace(/\\u002F/g, "/")
-            .replace(/\\/g, "");
-
-        if (!path.startsWith("/")) {
-            path = "/" + path;
-        }
-
-        const url = absoluteUrl(path);
-
-        if (url) {
-            return url;
-        }
-    }
-
-    /*
-     * Predictable fallback.
-     */
-    const slugMatch = seriesUrl.match(
-        /\/series\/comic\/([^/]+)\/?$/i
-    );
-
-    if (!slugMatch) {
-        return null;
-    }
-
-    const slug = slugMatch[1];
-
-    const fallbackUrls = [
-        `${BASE_URL}/series/comic/${slug}/chapter/${wantedChapter}`
-    ];
-
-    for (const url of fallbackUrls) {
-        try {
-            const result = await request(url);
-
-            if (
-                result.html &&
-                result.html.length > 1000 &&
-                !/404|not found/i.test(result.html)
-            ) {
-                return url;
-            }
-        } catch (_) {}
     }
 
     return null;
 }
 
-function extractReaderImages(html) {
-    const decoded = decodeRscPayload(html);
+function sameChapter(a, b) {
+    const x = parseFloat(String(a));
+    const y = parseFloat(String(b));
 
-    const combined = html + "\n" + decoded;
+    if (!Number.isNaN(x) && !Number.isNaN(y)) {
+        return Math.abs(x - y) < 0.000001;
+    }
 
-    let images = extractImages(combined);
+    return String(a).trim() === String(b).trim();
+}
 
-    /*
-     * Additional extraction for Next.js image payloads.
-     */
-    const extraPatterns = [
-        /"imageUrl"\s*:\s*"([^"]+)"/gi,
-        /"image"\s*:\s*"([^"]+\.(?:jpg|jpeg|png|webp|avif)[^"]*)"/gi,
-        /\\"imageUrl\\"\s*:\s*\\"([^"\\]+)\\"/gi,
-        /\\"image\\"\s*:\s*\\"([^"\\]+\.(?:jpg|jpeg|png|webp|avif)[^"\\]*)\\"/gi
+/*
+ * Extract chapter URLs from the RSC payload.
+ */
+function extractChapterLinks(html) {
+    const decoded = decodeRSC(html);
+
+    const combined =
+        html + "\n" + decoded;
+
+    const results = [];
+    const seen = new Set();
+
+    const regexes = [
+        /\/series\/comic\/[^"'\\\s]+\/chapter\/[^"'\\\s]+/gi,
+
+        /https?:\/\/witchtoons\.net\/series\/comic\/[^"'\\\s]+\/chapter\/[^"'\\\s]+/gi
     ];
 
-    const seen = new Set(images);
+    for (const regex of regexes) {
+        let match;
 
-    for (const regex of extraPatterns) {
+        while ((match = regex.exec(combined))) {
+            let url = match[0];
+
+            url = url
+                .replace(/\\u002F/gi, "/")
+                .replace(/\\u002D/gi, "-")
+                .replace(/\\"/g, "");
+
+            url =
+                absoluteUrl(url) ||
+                url;
+
+            if (!url) continue;
+
+            const cleanUrl =
+                url.split("?")[0].split("#")[0];
+
+            const ch =
+                chapterNumber(cleanUrl);
+
+            if (ch === null) continue;
+
+            if (seen.has(cleanUrl)) continue;
+
+            seen.add(cleanUrl);
+
+            results.push({
+                url: cleanUrl,
+                chapter: ch
+            });
+        }
+    }
+
+    return results;
+}
+
+/*
+ * Extract reader image URLs.
+ */
+function extractImages(html) {
+    const decoded = decodeRSC(html);
+
+    const combined =
+        html + "\n" + decoded;
+
+    const images = [];
+    const seen = new Set();
+
+    const regexes = [
+        /<img[^>]+src=["']([^"']+)["']/gi,
+
+        /<img[^>]+data-src=["']([^"']+)["']/gi,
+
+        /<img[^>]+data-lazy-src=["']([^"']+)["']/gi,
+
+        /"src"\s*:\s*"([^"]+\.(?:jpg|jpeg|png|webp|avif)(?:\?[^"]*)?)"/gi,
+
+        /"image"\s*:\s*"([^"]+\.(?:jpg|jpeg|png|webp|avif)(?:\?[^"]*)?)"/gi,
+
+        /"imageUrl"\s*:\s*"([^"]+\.(?:jpg|jpeg|png|webp|avif)(?:\?[^"]*)?)"/gi,
+
+        /\\"src\\"\s*:\s*\\"([^"\\]+\.(?:jpg|jpeg|png|webp|avif)(?:\?[^"\\]*)?)\\"/gi,
+
+        /\\"image\\"\s*:\s*\\"([^"\\]+\.(?:jpg|jpeg|png|webp|avif)(?:\?[^"\\]*)?)\\"/gi,
+
+        /\\"imageUrl\\"\s*:\s*\\"([^"\\]+\.(?:jpg|jpeg|png|webp|avif)(?:\?[^"\\]*)?)\\"/gi
+    ];
+
+    for (const regex of regexes) {
         let match;
 
         while ((match = regex.exec(combined))) {
             let url = match[1];
 
-            url = absoluteUrl(url) || url;
+            url = url
+                .replace(/\\u002F/gi, "/")
+                .replace(/\\u0026/gi, "&")
+                .replace(/\\"/g, "");
+
+            url =
+                absoluteUrl(url) ||
+                url;
 
             if (!url) continue;
 
-            url = url
-                .replace(/\\u0026/g, "&")
-                .replace(/\\u002F/g, "/")
-                .replace(/\\"/g, "");
-
             if (
-                !/\.(jpg|jpeg|png|webp|avif)(?:[?#].*)?$/i.test(
-                    url
-                )
+                !/\.(jpg|jpeg|png|webp|avif)(?:[?#].*)?$/i.test(url)
             ) {
                 continue;
             }
 
+            const lower = url.toLowerCase();
+
+            /*
+             * Do not return covers/thumbnails.
+             */
             if (
-                /\/covers?\//i.test(url) ||
-                /\/thumbnail/i.test(url) ||
-                /\/thumbs?\//i.test(url)
+                lower.includes("/cover/") ||
+                lower.includes("/covers/") ||
+                lower.includes("/thumbnail") ||
+                lower.includes("/thumb/") ||
+                lower.includes("/thumbs/")
             ) {
                 continue;
             }
@@ -640,44 +327,247 @@ function extractReaderImages(html) {
         }
     }
 
-    /*
-     * Remove duplicate URLs.
-     */
-    images = [...new Set(images)];
-
-    /*
-     * Keep actual reader pages only.
-     */
-    images = images.filter(url => {
-        const lower = url.toLowerCase();
-
-        if (
-            lower.includes("/cover/") ||
-            lower.includes("/covers/") ||
-            lower.includes("/thumbnail") ||
-            lower.includes("/thumb/")
-        ) {
-            return false;
-        }
-
-        return true;
-    });
-
     return images;
 }
 
-async function getChapter(title, chapter) {
-    const wantedTitle = cleanText(title);
-    const wantedChapter = cleanText(chapter);
+/*
+ * Search by predictable slug FIRST.
+ *
+ * This is important because WitchToons' current search
+ * interface is rendered through Next.js and may not expose
+ * its results as normal HTML links.
+ */
+async function searchManga(title) {
+    const wanted = cleanText(title);
 
-    if (!wantedTitle || !wantedChapter) {
-        throw new Error("Title and chapter are required.");
+    if (!wanted) {
+        return null;
+    }
+
+    const slug = slugify(wanted);
+
+    /*
+     * Known direct series URL.
+     */
+    const directUrl =
+        `${BASE_URL}/series/comic/${slug}`;
+
+    try {
+        const page =
+            await request(directUrl);
+
+        if (
+            page.html &&
+            page.html.length > 500
+        ) {
+            const realTitle =
+                extractTitle(
+                    page.html,
+                    wanted
+                );
+
+            /*
+             * Don't reject merely because the title
+             * formatting differs.
+             */
+            return {
+                url: directUrl,
+                title:
+                    realTitle || wanted
+            };
+        }
+    } catch (_) {}
+
+    /*
+     * Search fallbacks.
+     */
+    const searchUrls = [
+        `${BASE_URL}/series?search=${encodeURIComponent(wanted)}`,
+        `${BASE_URL}/series?keyword=${encodeURIComponent(wanted)}`,
+        `${BASE_URL}/search?q=${encodeURIComponent(wanted)}`,
+        `${BASE_URL}/search?keyword=${encodeURIComponent(wanted)}`
+    ];
+
+    let best = null;
+    let bestScore = 0;
+
+    for (const searchUrl of searchUrls) {
+        try {
+            const page =
+                await request(searchUrl);
+
+            const decoded =
+                decodeRSC(page.html);
+
+            const combined =
+                page.html + "\n" + decoded;
+
+            const regex =
+                /\/series\/comic\/([a-z0-9-]+)/gi;
+
+            let match;
+
+            while ((match = regex.exec(combined))) {
+                const candidateUrl =
+                    `${BASE_URL}/series/comic/${match[1]}`;
+
+                let candidateTitle =
+                    match[1]
+                        .replace(/-/g, " ");
+
+                try {
+                    const candidate =
+                        await request(candidateUrl);
+
+                    candidateTitle =
+                        extractTitle(
+                            candidate.html,
+                            candidateTitle
+                        );
+                } catch (_) {}
+
+                const a =
+                    normalizeTitle(candidateTitle);
+
+                const b =
+                    normalizeTitle(wanted);
+
+                let score = 0;
+
+                if (a === b) {
+                    score = 100;
+                } else if (
+                    a.includes(b) ||
+                    b.includes(a)
+                ) {
+                    score = 75;
+                } else {
+                    const aw =
+                        new Set(a.split(" "));
+
+                    const bw =
+                        b.split(" ");
+
+                    for (const word of bw) {
+                        if (aw.has(word)) {
+                            score += 10;
+                        }
+                    }
+                }
+
+                if (score > bestScore) {
+                    bestScore = score;
+
+                    best = {
+                        url: candidateUrl,
+                        title: candidateTitle
+                    };
+                }
+            }
+
+            if (bestScore >= 100) {
+                return best;
+            }
+        } catch (_) {}
+    }
+
+    return best;
+}
+
+/*
+ * Find exact chapter.
+ */
+async function findChapter(
+    seriesHtml,
+    seriesUrl,
+    requestedChapter
+) {
+    const chapters =
+        extractChapterLinks(seriesHtml);
+
+    /*
+     * Exact chapter from RSC.
+     */
+    for (const item of chapters) {
+        if (
+            sameChapter(
+                item.chapter,
+                requestedChapter
+            )
+        ) {
+            return item.url;
+        }
     }
 
     /*
-     * 1. Find the series.
+     * Direct chapter URL.
+     *
+     * Current WitchToons structure:
+     * /series/comic/{slug}/chapter/{number}
      */
-    const manga = await searchManga(wantedTitle);
+    const match =
+        seriesUrl.match(
+            /\/series\/comic\/([^/]+)\/?$/i
+        );
+
+    if (!match) {
+        return null;
+    }
+
+    const slug = match[1];
+
+    const direct =
+        `${BASE_URL}/series/comic/${slug}/chapter/${requestedChapter}`;
+
+    try {
+        const page =
+            await request(direct);
+
+        /*
+         * A real reader page should contain
+         * substantially more than an error page.
+         */
+        if (
+            page.html &&
+            page.html.length > 1000 &&
+            !/page not found|404 not found/i.test(
+                page.html
+            )
+        ) {
+            return direct;
+        }
+    } catch (_) {}
+
+    return null;
+}
+
+async function getChapter(
+    title,
+    chapter
+) {
+    const wantedTitle =
+        cleanText(title);
+
+    const wantedChapter =
+        cleanText(chapter);
+
+    if (!wantedTitle) {
+        throw new Error(
+            "Manga title is required."
+        );
+    }
+
+    if (!wantedChapter) {
+        throw new Error(
+            "Chapter number is required."
+        );
+    }
+
+    /*
+     * 1. Find series.
+     */
+    const manga =
+        await searchManga(wantedTitle);
 
     if (!manga) {
         throw new Error(
@@ -686,18 +576,20 @@ async function getChapter(title, chapter) {
     }
 
     /*
-     * 2. Open the series page.
+     * 2. Get series page.
      */
-    const seriesPage = await request(manga.url);
+    const seriesPage =
+        await request(manga.url);
 
     /*
-     * 3. Find requested chapter.
+     * 3. Find chapter.
      */
-    const chapterUrl = await findChapterFromSeriesPage(
-        seriesPage.html,
-        manga.url,
-        wantedChapter
-    );
+    const chapterUrl =
+        await findChapter(
+            seriesPage.html,
+            manga.url,
+            wantedChapter
+        );
 
     if (!chapterUrl) {
         throw new Error(
@@ -706,16 +598,16 @@ async function getChapter(title, chapter) {
     }
 
     /*
-     * 4. Open chapter reader.
+     * 4. Open reader.
      */
-    const chapterPage = await request(chapterUrl);
+    const reader =
+        await request(chapterUrl);
 
     /*
-     * 5. Extract reader pages.
+     * 5. Extract pages.
      */
-    const pages = extractReaderImages(
-        chapterPage.html
-    );
+    const pages =
+        extractImages(reader.html);
 
     if (!pages.length) {
         throw new Error(
@@ -724,26 +616,25 @@ async function getChapter(title, chapter) {
     }
 
     /*
-     * Safety against accidentally returning tiny
-     * thumbnail/cover-only responses.
+     * Remove duplicates while preserving
+     * original page order.
      */
-    if (pages.length === 1) {
-        const only = pages[0];
-
-        if (
-            /cover|thumbnail|thumb/i.test(only)
-        ) {
-            throw new Error(
-                "WitchToons returned only a cover/thumbnail image."
-            );
-        }
-    }
+    const uniquePages =
+        [...new Set(pages)];
 
     return {
-        title: manga.title || wantedTitle,
-        chapter: wantedChapter,
-        source: "WitchToons",
-        pages
+        title:
+            manga.title ||
+            wantedTitle,
+
+        chapter:
+            wantedChapter,
+
+        source:
+            "WitchToons",
+
+        pages:
+            uniquePages
     };
 }
 
@@ -751,6 +642,9 @@ module.exports = {
     name: "WitchToons",
 
     async getChapter(title, chapter) {
-        return await getChapter(title, chapter);
+        return await getChapter(
+            title,
+            chapter
+        );
     }
 };
