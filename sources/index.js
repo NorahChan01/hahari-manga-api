@@ -1,5 +1,5 @@
-const MangaBats = require("./mangabats");
+const MangaLivre = require("./mangalivre");
 
 module.exports = [
-    MangaBats
+    MangaLivre
 ];
