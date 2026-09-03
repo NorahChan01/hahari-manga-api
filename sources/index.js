@@ -1,5 +1,5 @@
-const MangaPark = require("./mangapark");
+const MangaK = require("./mangak");
 
 module.exports = [
-    MangaPark
+    MangaK
 ];
