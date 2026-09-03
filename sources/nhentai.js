@@ -2,12 +2,14 @@ const axios = require("axios");
 
 const BASE_URL = "https://nhentai.net";
 const API_URL = `${BASE_URL}/api/v2`;
+const IMAGE_BASE = "https://i.nhentai.net";
 
 const client = axios.create({
     timeout: 20000,
     headers: {
         "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/128 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+            "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
         "Accept": "application/json",
         "Referer": `${BASE_URL}/`
     }
@@ -24,12 +26,17 @@ function cleanTitle(title) {
 function getGalleryId(input) {
     const text = String(input || "").trim();
 
-    // https://nhentai.net/g/123456/
-    const urlMatch = text.match(/nhentai\.net\/g\/(\d+)/i);
-    if (urlMatch) return urlMatch[1];
+    const urlMatch = text.match(
+        /(?:https?:\/\/)?(?:www\.)?nhentai\.net\/g\/(\d+)/i
+    );
 
-    // Direct numeric ID
-    if (/^\d+$/.test(text)) return text;
+    if (urlMatch) {
+        return urlMatch[1];
+    }
+
+    if (/^\d+$/.test(text)) {
+        return text;
+    }
 
     return null;
 }
@@ -43,43 +50,45 @@ function getTitle(gallery) {
     ).trim();
 }
 
-function extensionFromType(type) {
-    const value = String(type || "").toLowerCase();
+/*
+ * nHentai image type mapping:
+ *
+ * j = jpg
+ * p = png
+ *
+ * The type MUST come from images.pages[i].t.
+ */
+function getExtension(type) {
+    switch (String(type || "").toLowerCase()) {
+        case "j":
+            return "jpg";
 
-    if (value === "p") return "png";
-    if (value === "g") return "gif";
-    if (value === "w") return "webp";
+        case "p":
+            return "png";
 
-    return "jpg";
+        default:
+            throw new Error(
+                `Unsupported nHentai image type: ${type}`
+            );
+    }
 }
 
 async function getGallery(id) {
-    const urls = [
-        `${API_URL}/galleries/${id}`,
-        `${BASE_URL}/api/gallery/${id}`
-    ];
+    const response = await client.get(
+        `${API_URL}/galleries/${encodeURIComponent(id)}`
+    );
 
-    let lastError = null;
-
-    for (const url of urls) {
-        try {
-            const response = await client.get(url);
-
-            if (response.data && response.data.id) {
-                return response.data;
-            }
-        } catch (error) {
-            lastError = error;
-        }
+    if (!response.data || !response.data.id) {
+        throw new Error("Invalid nHentai gallery response.");
     }
 
-    throw lastError || new Error("Gallery not found.");
+    return response.data;
 }
 
-async function searchGallery(title) {
+async function searchGallery(query) {
     const response = await client.get(`${API_URL}/search`, {
         params: {
-            query: title,
+            query,
             sort: "popular",
             page: 1
         }
@@ -88,18 +97,18 @@ async function searchGallery(title) {
     const results = response.data?.results || [];
 
     if (!results.length) {
-        throw new Error(`No nHentai results found for "${title}".`);
+        throw new Error(
+            `No nHentai results found for "${query}".`
+        );
     }
 
-    const wanted = cleanTitle(title);
+    const wanted = cleanTitle(query);
 
-    // Prefer an exact title match.
-    const exact = results.find(item => {
+    const exact = results.find(result => {
         const titles = [
-            item.title?.english,
-            item.title?.pretty,
-            item.title?.japanese,
-            item.title
+            result.title?.english,
+            result.title?.pretty,
+            result.title?.japanese
         ]
             .filter(Boolean)
             .map(cleanTitle);
@@ -115,64 +124,72 @@ async function getChapter(title, chapter) {
     const chapterNumber = String(chapter || "").trim();
 
     if (!query) {
-        throw new Error("Manga/gallery title is required.");
+        throw new Error("nHentai gallery ID or title is required.");
     }
-
-    /*
-     * nHentai galleries do not use manga-style chapters.
-     *
-     * Therefore:
-     *
-     *   -manga <title> <number>
-     *
-     * is interpreted as:
-     *   <number> = nHentai gallery ID
-     *
-     * when the supplied number is a valid gallery ID.
-     */
 
     let gallery;
 
+    /*
+     * Direct gallery ID:
+     *
+     * -manga 263492
+     */
     const directId =
         getGalleryId(query) ||
-        (/^\d+$/.test(chapterNumber) ? chapterNumber : null);
+        (/^\d+$/.test(chapterNumber)
+            ? chapterNumber
+            : null);
 
     if (directId) {
         gallery = await getGallery(directId);
     } else {
+        /*
+         * Title search.
+         */
         const result = await searchGallery(query);
+
+        if (!result?.id) {
+            throw new Error("Search result has no gallery ID.");
+        }
+
         gallery = await getGallery(result.id);
     }
 
     const mediaId = gallery.media_id;
 
     if (!mediaId) {
-        throw new Error("nHentai gallery has no media ID.");
+        throw new Error("Gallery has no media_id.");
     }
 
-    const pageCount = Number(gallery.num_pages || 0);
+    const pageData = gallery.images?.pages;
 
-    if (!pageCount) {
-        throw new Error("nHentai gallery contains no pages.");
+    if (!Array.isArray(pageData) || !pageData.length) {
+        throw new Error("Gallery contains no page data.");
     }
 
     const pages = [];
 
     /*
-     * nHentai image servers use:
+     * Build every page from the ACTUAL image type
+     * returned by nHentai.
      *
-     * i.nhentai.net/galleries/{media_id}/{page}.{extension}
+     * Example:
      *
-     * Page extensions come from the gallery's `images.pages` data.
+     * t = "p" -> 1.png
+     * t = "j" -> 1.jpg
      */
-    for (let i = 0; i < pageCount; i++) {
-        const pageData = gallery.images?.pages?.[i];
-        const type = pageData?.t || "j";
-        const extension = extensionFromType(type);
+    for (let i = 0; i < pageData.length; i++) {
+        const page = pageData[i];
+
+        const extension = getExtension(page?.t);
 
         pages.push(
-            `https://i.nhentai.net/galleries/${mediaId}/${i + 1}.${extension}`
+            `${IMAGE_BASE}/galleries/${mediaId}/${i + 1}.${extension}`
         );
+    }
+
+    if (!pages.length) {
+        throw new Error("Failed to generate gallery page URLs.");
     }
 
     return {
