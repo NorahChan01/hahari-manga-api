@@ -17,10 +17,10 @@ const PORT = process.env.PORT || 3000;
  */
 const imageCache = new Map();
 
-const IMAGE_CACHE_TTL = 10 * 60 * 1000; // 10 minutes
+const IMAGE_CACHE_TTL = 10 * 60 * 1000;
 
 /*
- * Clean expired cached images periodically.
+ * Clean expired cached images.
  */
 setInterval(() => {
     const now = Date.now();
@@ -36,7 +36,7 @@ setInterval(() => {
 }, 60 * 1000);
 
 /*
- * Create a temporary image token.
+ * Create temporary image token.
  */
 function createImageToken(image_url, scramble) {
     const token = crypto
@@ -53,17 +53,7 @@ function createImageToken(image_url, scramble) {
 }
 
 /*
- * Normalize manga titles for comparison.
- *
- * Examples:
- *
- * "Naruto"
- * "NARUTO!"
- * "naruto"
- *
- * all become:
- *
- * "naruto"
+ * Normalize title.
  */
 function normalizeTitle(text) {
     return String(text || "")
@@ -78,8 +68,7 @@ function normalizeTitle(text) {
 }
 
 /*
- * Remove common title prefixes/suffixes that sources
- * sometimes add.
+ * Clean common title prefixes/suffixes.
  */
 function cleanTitle(text) {
     return normalizeTitle(text)
@@ -95,16 +84,25 @@ function cleanTitle(text) {
 }
 
 /*
- * Calculate how closely a source title matches the
- * title requested by the user.
+ * Check if request is a numeric ID.
  *
- * Score:
+ * This is important for nHentai.
  *
- * 100 = exact normalized match
- *  95 = exact after removing common prefixes
- *  90 = one contains the other
- *  80+ = strong word overlap
- *  lower = weak/unsafe match
+ * Example:
+ *
+ * -manga 535539 2
+ *
+ * "535539" is not a manga title.
+ * It is a gallery ID.
+ */
+function isNumericId(text) {
+    return /^\d+$/.test(
+        String(text || "").trim()
+    );
+}
+
+/*
+ * Calculate title similarity.
  */
 function titleMatchScore(requested, returned) {
     const wanted =
@@ -118,14 +116,14 @@ function titleMatchScore(requested, returned) {
     }
 
     /*
-     * Exact match.
+     * Exact title.
      */
     if (wanted === actual) {
         return 100;
     }
 
     /*
-     * Match after removing harmless title words.
+     * Exact match after removing common words.
      */
     const cleanWanted =
         cleanTitle(requested);
@@ -142,8 +140,7 @@ function titleMatchScore(requested, returned) {
     }
 
     /*
-     * Prevent tiny queries from matching huge unrelated
-     * titles.
+     * Very short titles are kept strict.
      */
     if (
         wanted.length < 4 ||
@@ -153,17 +150,7 @@ function titleMatchScore(requested, returned) {
     }
 
     /*
-     * Exact containment.
-     *
-     * Example:
-     *
-     * requested:
-     * "naruto"
-     *
-     * returned:
-     * "naruto shippuden"
-     *
-     * This is allowed, but is weaker than exact.
+     * Containment matching.
      */
     if (
         actual.includes(wanted) ||
@@ -181,9 +168,6 @@ function titleMatchScore(requested, returned) {
                 actual.length
             );
 
-        /*
-         * Don't accept extremely unbalanced matches.
-         */
         if (
             shorter / longer >= 0.45
         ) {
@@ -192,17 +176,23 @@ function titleMatchScore(requested, returned) {
     }
 
     /*
-     * Word-overlap matching.
+     * Word overlap.
      */
     const wantedWords =
         wanted
             .split(" ")
-            .filter(word => word.length >= 2);
+            .filter(
+                word =>
+                    word.length >= 2
+            );
 
     const actualWords =
         actual
             .split(" ")
-            .filter(word => word.length >= 2);
+            .filter(
+                word =>
+                    word.length >= 2
+            );
 
     if (
         !wantedWords.length ||
@@ -224,16 +214,16 @@ function titleMatchScore(requested, returned) {
             continue;
         }
 
-        /*
-         * Allow a word to be contained in another word
-         * only when the word is reasonably long.
-         */
         if (
             wantedWord.length >= 5 &&
             actualWords.some(
                 actualWord =>
-                    actualWord.includes(wantedWord) ||
-                    wantedWord.includes(actualWord)
+                    actualWord.includes(
+                        wantedWord
+                    ) ||
+                    wantedWord.includes(
+                        actualWord
+                    )
             )
         ) {
             matched++;
@@ -243,18 +233,11 @@ function titleMatchScore(requested, returned) {
     const coverage =
         matched / wantedWords.length;
 
-    /*
-     * Strong match.
-     */
-    if (
-        coverage >= 0.9
-    ) {
+    if (coverage >= 0.9) {
         return 85;
     }
 
-    if (
-        coverage >= 0.75
-    ) {
+    if (coverage >= 0.75) {
         return 75;
     }
 
@@ -266,13 +249,7 @@ function titleMatchScore(requested, returned) {
     }
 
     /*
-     * One-word titles need to be strict.
-     *
-     * This prevents:
-     *
-     * "naruto"
-     *
-     * from accidentally matching something unrelated.
+     * Single-word titles must be strict.
      */
     if (
         wantedWords.length === 1
@@ -284,14 +261,33 @@ function titleMatchScore(requested, returned) {
 }
 
 /*
- * Determine whether a source result is actually
- * relevant to the requested manga.
+ * Determine whether a result is acceptable.
+ *
+ * Numeric IDs are automatically accepted.
  */
-function isAcceptableMatch(requestedTitle, result) {
+function isAcceptableMatch(
+    requestedTitle,
+    result
+) {
+    if (!result) {
+        return false;
+    }
+
+    /*
+     * Numeric requests are direct IDs.
+     *
+     * Example:
+     * 535539
+     */
     if (
-        !result ||
-        !result.title
+        isNumericId(
+            requestedTitle
+        )
     ) {
+        return true;
+    }
+
+    if (!result.title) {
         return false;
     }
 
@@ -305,52 +301,54 @@ function isAcceptableMatch(requestedTitle, result) {
 }
 
 /*
- * Prepare MangaDenizi pages.
- *
- * MangaDenizi returns objects:
- *
- * {
- *   image_url,
- *   scramble
- * }
- *
- * Other sources return normal URL strings.
+ * Process source pages.
  */
 function processResultPages(
     source,
     result,
     req
 ) {
-    let pages = result.pages;
+    let pages =
+        result.pages;
 
+    /*
+     * MangaDenizi returns:
+     *
+     * {
+     *   image_url,
+     *   scramble
+     * }
+     */
     if (
         source.name === "MangaDenizi" &&
-        typeof source.processImage === "function"
+        typeof source.processImage ===
+            "function"
     ) {
 
         pages =
-            result.pages.map(page => {
+            result.pages.map(
+                page => {
 
-                const token =
-                    createImageToken(
-                        page.image_url,
-                        page.scramble
+                    const token =
+                        createImageToken(
+                            page.image_url,
+                            page.scramble
+                        );
+
+                    return (
+                        `/api/manga/image/${token}`
                     );
-
-                return (
-                    `/api/manga/image/${token}`
-                );
-            });
+                }
+            );
 
         /*
-         * Convert relative URLs into absolute URLs.
+         * Convert relative URLs to absolute URLs.
          */
         pages =
-            pages.map(page => {
-                return (
+            pages.map(
+                page =>
                     `${req.protocol}://${req.get("host")}${page}`
-                );
-            });
+            );
 
         console.log(
             `[MangaDenizi] Created ${pages.length} image tokens.`
@@ -364,12 +362,14 @@ function processResultPages(
  * Root.
  */
 app.get("/", (req, res) => {
+
     res.json({
         success: true,
         name: "Hahari Manga API",
         version: "1.0.0",
         status: "online"
     });
+
 });
 
 /*
@@ -393,6 +393,7 @@ app.get(
             !mangaName ||
             !chapterNumber
         ) {
+
             return res.status(400).json({
                 success: false,
                 error:
@@ -400,15 +401,23 @@ app.get(
                 example:
                     "/api/manga?title=naruto&chapter=11"
             });
+
         }
 
         const errors = [];
 
         /*
-         * We query every source instead of immediately
-         * returning the first source that has pages.
+         * Determine whether this is a direct numeric ID.
+         */
+        const numericRequest =
+            isNumericId(
+                mangaName
+            );
+
+        /*
+         * Ask every source.
          *
-         * This is the important fix.
+         * We don't immediately accept the first result.
          */
         const results =
             await Promise.all(
@@ -436,11 +445,19 @@ app.get(
                                 result.pages.length
                             ) {
 
+                                /*
+                                 * Numeric ID:
+                                 *
+                                 * Do NOT compare the ID against
+                                 * the returned gallery title.
+                                 */
                                 const score =
-                                    titleMatchScore(
-                                        mangaName,
-                                        result.title
-                                    );
+                                    numericRequest
+                                        ? 100
+                                        : titleMatchScore(
+                                            mangaName,
+                                            result.title
+                                        );
 
                                 console.log(
                                     `[MANGA] ${source.name} returned ` +
@@ -478,29 +495,35 @@ app.get(
                                     error.message
                             };
                         }
+
                     }
                 )
             );
 
         /*
-         * Store source errors for the final failure response.
+         * Collect source errors.
          */
-        for (const item of results) {
+        for (
+            const item of results
+        ) {
 
             if (
                 item.error
             ) {
+
                 errors.push({
                     source:
                         item.source.name,
                     error:
                         item.error
                 });
+
             }
+
         }
 
         /*
-         * Keep only results that have actual pages.
+         * Only sources that returned pages.
          */
         const validResults =
             results.filter(
@@ -513,21 +536,9 @@ app.get(
             );
 
         /*
-         * IMPORTANT:
+         * Find acceptable results.
          *
-         * Reject unrelated results.
-         *
-         * Example:
-         *
-         * Requested:
-         * Naruto
-         *
-         * Asura:
-         * 7.1 Limitless Predation
-         *
-         * score = 0
-         *
-         * Therefore it is rejected.
+         * Numeric IDs automatically pass.
          */
         const acceptableResults =
             validResults.filter(
@@ -539,13 +550,7 @@ app.get(
             );
 
         /*
-         * Sort by title relevance first.
-         *
-         * If two sources both have Naruto,
-         * the source returning the exact title wins.
-         *
-         * If the scores are identical, preserve the
-         * original source order.
+         * Highest match wins.
          */
         acceptableResults.sort(
             (a, b) =>
@@ -553,7 +558,7 @@ app.get(
         );
 
         /*
-         * If there is a strong match, use it.
+         * Select the best result.
          */
         if (
             acceptableResults.length
@@ -592,20 +597,32 @@ app.get(
                     source.name,
                 pages
             });
+
         }
 
         /*
-         * No acceptable title match.
+         * No acceptable result.
          */
         console.log(
             `[MANGA] No acceptable title match for "${mangaName}".`
         );
 
         /*
-         * Add useful information about results that
-         * were rejected because their titles did not match.
+         * Add rejected results to error information.
          */
-        for (const item of validResults) {
+        for (
+            const item of validResults
+        ) {
+
+            /*
+             * Numeric requests should never reach here,
+             * but keep this safe.
+             */
+            if (
+                numericRequest
+            ) {
+                continue;
+            }
 
             const score =
                 titleMatchScore(
@@ -627,7 +644,9 @@ app.get(
                         `"${mangaName}" ` +
                         `(match score: ${score}).`
                 });
+
             }
+
         }
 
         return res.status(404).json({
@@ -641,22 +660,12 @@ app.get(
             sourcesTried:
                 errors
         });
+
     }
 );
 
 /*
  * MangaDenizi image proxy.
- *
- * manga.js requests:
- *
- * /api/manga/image/{token}
- *
- * The server then:
- *
- * 1. Finds the cached MangaDenizi image.
- * 2. Downloads it.
- * 3. Applies XOR or tiled-v1 descrambling.
- * 4. Sends the final image to the bot.
  */
 app.get(
     "/api/manga/image/:token",
@@ -668,31 +677,32 @@ app.get(
             ).trim();
 
         if (!token) {
+
             return res.status(400).send(
                 "Missing image token."
             );
+
         }
 
         const cached =
             imageCache.get(token);
 
         if (!cached) {
+
             return res.status(404).send(
                 "Image token expired or not found."
             );
+
         }
 
         /*
-         * Refresh TTL when image is requested.
+         * Refresh TTL.
          */
         cached.createdAt =
             Date.now();
 
         try {
 
-            /*
-             * Find MangaDenizi source.
-             */
             const MangaDenizi =
                 sources.find(
                     source =>
@@ -705,28 +715,23 @@ app.get(
                 typeof MangaDenizi.processImage !==
                     "function"
             ) {
+
                 return res.status(500).send(
                     "MangaDenizi image processor is unavailable."
                 );
+
             }
 
             console.log(
                 `[MangaDenizi] Processing image ${token}`
             );
 
-            /*
-             * sharp is loaded by mangadenizi.js itself
-             * through its processor.
-             */
             const processed =
                 await MangaDenizi.processImage(
                     cached.image_url,
                     cached.scramble
                 );
 
-            /*
-             * Tell browser/bot what we're returning.
-             */
             res.setHeader(
                 "Content-Type",
                 processed.contentType ||
@@ -752,7 +757,9 @@ app.get(
             return res.status(500).send(
                 `Image processing failed: ${error.message}`
             );
+
         }
+
     }
 );
 
@@ -767,7 +774,9 @@ app.use(
             error
         );
 
-        if (res.headersSent) {
+        if (
+            res.headersSent
+        ) {
             return next(error);
         }
 
@@ -776,14 +785,20 @@ app.use(
             error:
                 "Internal server error."
         });
+
     }
 );
 
+/*
+ * Start server.
+ */
 app.listen(
     PORT,
     () => {
+
         console.log(
             `Hahari Manga API running on port ${PORT}`
         );
+
     }
 );
