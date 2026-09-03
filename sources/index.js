@@ -1,5 +1,5 @@
-const NHentai = require("./nhentai");
+const Toongod = require("./toongod");
 
 module.exports = [
-    NHentai
+    Toongod
 ];
