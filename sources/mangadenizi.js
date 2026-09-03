@@ -1,25 +1,23 @@
 const axios = require("axios");
-const crypto = require("crypto");
+const sharp = require("sharp");
 
 const BASE_URL = "https://mangadenizi.net";
-const API_URL = `${BASE_URL}/api/v1/web`;
+const API_BASE = `${BASE_URL}/api/v1/web`;
 
-const http = axios.create({
-    timeout: 30000,
-    maxRedirects: 5,
-    responseType: "json",
-    headers: {
-        "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-            "AppleWebKit/537.36 (KHTML, like Gecko) " +
-            "Chrome/139.0.0.0 Safari/537.36",
-        "Accept": "application/json,text/plain,*/*",
-        "Accept-Language": "en-US,en;q=0.9"
-    }
-});
+const SOURCE_NAME = "MangaDenizi";
 
-function normalize(value) {
-    return String(value || "")
+const DEFAULT_HEADERS = {
+    "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+        "AppleWebKit/537.36 (KHTML, like Gecko) " +
+        "Chrome/139.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": `${BASE_URL}/`
+};
+
+function normalize(text) {
+    return String(text || "")
         .toLowerCase()
         .normalize("NFKD")
         .replace(/[\u0300-\u036f]/g, "")
@@ -27,421 +25,492 @@ function normalize(value) {
         .trim();
 }
 
-function slugify(value) {
-    return normalize(value)
+function slugify(text) {
+    return normalize(text)
         .replace(/\s+/g, "-");
 }
 
-function numberEqual(a, b) {
-    const x = Number(a);
-    const y = Number(b);
-
-    return Number.isFinite(x) &&
-        Number.isFinite(y) &&
-        x === y;
+async function apiGet(url, options = {}) {
+    return axios.get(url, {
+        timeout: 30000,
+        maxRedirects: 5,
+        headers: {
+            ...DEFAULT_HEADERS,
+            ...(options.headers || {})
+        },
+        ...options
+    });
 }
 
 /*
- * Search manga through MangaDenizi's public API.
+ * Convert a value into an unsigned 32-bit integer.
  */
-async function findManga(title) {
-    const wanted = normalize(title);
+function uint32(value) {
+    return Number(value) >>> 0;
+}
 
-    /*
-     * MangaDenizi's API has paginated manga data.
-     *
-     * We scan pages until we find an exact/close title.
-     */
-    for (let page = 1; page <= 20; page++) {
-        try {
-            const response = await http.get(
-                `${API_URL}/manga?page=${page}`
-            );
+/*
+ * MangaDenizi XorShift32 PRNG.
+ */
+function xorshift32(state) {
+    state = uint32(state);
 
-            const list =
-                response.data?.data?.manga?.data;
+    state ^= uint32(state << 13);
+    state ^= state >>> 17;
+    state ^= uint32(state << 5);
 
-            if (!Array.isArray(list) || !list.length) {
-                break;
-            }
+    return uint32(state);
+}
 
-            let best = null;
-            let bestScore = 0;
+/*
+ * Generate a deterministic Fisher-Yates shuffle.
+ *
+ * This follows MangaDenizi's current tiled-v1
+ * scrambling implementation.
+ */
+function makeShuffle(size, seed, salt) {
+    const result = Array.from(
+        { length: size },
+        (_, i) => i
+    );
 
-            for (const manga of list) {
-                if (!manga?.title || !manga?.slug) {
-                    continue;
-                }
+    let state =
+        uint32(seed) ^
+        uint32(salt);
 
-                const found = normalize(manga.title);
+    if (state === 0) {
+        state = 0x9E3779B9;
+    }
 
-                let score = 0;
+    for (
+        let i = result.length - 1;
+        i > 0;
+        i--
+    ) {
+        state = xorshift32(state);
 
-                if (found === wanted) {
-                    score = 1000;
-                } else if (found.includes(wanted)) {
-                    score = 800;
-                } else if (wanted.includes(found)) {
-                    score = 700;
-                } else {
-                    const wantedWords =
-                        new Set(wanted.split(/\s+/));
+        const j =
+            state %
+            (i + 1);
 
-                    const foundWords =
-                        new Set(found.split(/\s+/));
+        const temp = result[i];
 
-                    let common = 0;
+        result[i] = result[j];
+        result[j] = temp;
+    }
 
-                    for (const word of wantedWords) {
-                        if (foundWords.has(word)) {
-                            common++;
-                        }
-                    }
+    return result;
+}
 
-                    score = common * 50;
-                }
+/*
+ * XOR descrambling.
+ *
+ * MangaDenizi supplies the key through:
+ *
+ * X-Scramble-Key
+ */
+function xorBuffer(buffer, key) {
 
-                if (score > bestScore) {
-                    bestScore = score;
+    if (
+        key === undefined ||
+        key === null
+    ) {
+        return buffer;
+    }
 
-                    best = {
-                        title: manga.title,
-                        slug: manga.slug
-                    };
-                }
-            }
+    let numericKey = key;
 
-            if (best) {
-                return best;
-            }
-        } catch (error) {
-            /*
-             * Don't immediately kill the search.
-             * Try the next page.
-             */
+    if (typeof numericKey === "string") {
+
+        const trimmed =
+            numericKey.trim();
+
+        if (
+            /^0x[0-9a-f]+$/i.test(trimmed)
+        ) {
+            numericKey =
+                parseInt(
+                    trimmed,
+                    16
+                );
+        } else {
+            numericKey =
+                Number(trimmed);
         }
     }
 
-    /*
-     * Direct slug fallback.
-     */
-    const slug = slugify(title);
+    numericKey =
+        Number(numericKey);
 
-    try {
-        const response = await http.get(
-            `${API_URL}/manga/${encodeURIComponent(slug)}`
+    if (
+        !Number.isFinite(numericKey)
+    ) {
+        return buffer;
+    }
+
+    numericKey =
+        numericKey & 0xff;
+
+    const output =
+        Buffer.from(buffer);
+
+    for (
+        let i = 0;
+        i < output.length;
+        i++
+    ) {
+        output[i] ^= numericKey;
+    }
+
+    return output;
+}
+
+/*
+ * Convert a seed supplied by MangaDenizi
+ * into a usable unsigned 32-bit value.
+ */
+function parseSeed(value) {
+
+    if (
+        value === undefined ||
+        value === null
+    ) {
+        return null;
+    }
+
+    if (
+        typeof value === "number" &&
+        Number.isFinite(value)
+    ) {
+        return uint32(value);
+    }
+
+    const text =
+        String(value).trim();
+
+    if (!text) {
+        return null;
+    }
+
+    if (
+        /^0x[0-9a-f]+$/i.test(text)
+    ) {
+        return uint32(
+            parseInt(
+                text,
+                16
+            )
         );
+    }
 
-        const manga =
-            response.data?.data?.manga;
+    const number =
+        Number(text);
 
-        if (manga?.slug && manga?.title) {
-            return {
-                title: manga.title,
-                slug: manga.slug
-            };
-        }
-    } catch (_) {}
+    if (
+        Number.isFinite(number)
+    ) {
+        return uint32(number);
+    }
 
     return null;
 }
 
 /*
- * MangaDenizi's current API returns chapters from:
+ * Parse the MangaDenizi grid.
  *
- * /api/v1/web/manga/{slug}
+ * Examples:
+ *
+ * { columns: 4, rows: 5 }
+ *
+ * or
+ *
+ * [4, 5]
  */
-async function getChapters(manga) {
-    const response = await http.get(
-        `${API_URL}/manga/${encodeURIComponent(manga.slug)}`
-    );
+function parseGrid(grid) {
 
-    const chapters =
-        response.data?.data?.manga?.chapters;
-
-    if (!Array.isArray(chapters)) {
-        throw new Error(
-            "MangaDenizi returned no chapter list."
-        );
+    if (!grid) {
+        return null;
     }
 
-    return chapters;
-}
+    if (Array.isArray(grid)) {
 
-/*
- * Get the actual reader payload.
- *
- * Current endpoint:
- *
- * /api/v1/web/read/{manga-slug}/{chapter-slug}/payload
- */
-async function getPayload(mangaSlug, chapterSlug) {
-    const response = await http.get(
-        `${API_URL}/read/` +
-        `${encodeURIComponent(mangaSlug)}/` +
-        `${encodeURIComponent(chapterSlug)}/payload`
-    );
+        if (grid.length >= 2) {
 
-    const pages = response.data?.pages;
+            const columns =
+                Number(grid[0]);
 
-    if (!Array.isArray(pages)) {
-        throw new Error(
-            "MangaDenizi returned an invalid reader payload."
-        );
-    }
+            const rows =
+                Number(grid[1]);
 
-    return pages;
-}
-
-/*
- * XorShift32 used by MangaDenizi's tiled-v1 algorithm.
- *
- * This mirrors the current HaruNeko implementation.
- */
-class PRNG {
-    constructor(init, salt) {
-        const seed =
-            ((Number(init) >>> 0) ^
-                (Number(salt) >>> 0)) >>> 0;
-
-        this.seed =
-            seed || 0x9E3779B9;
-
-        this.state = this.seed;
-    }
-
-    next() {
-        this.state =
-            (this.state ^
-                ((this.state << 13) >>> 0)) >>> 0;
-
-        this.state =
-            (this.state ^
-                (this.state >>> 17)) >>> 0;
-
-        this.state =
-            (this.state ^
-                ((this.state << 5) >>> 0)) >>> 0;
-
-        return this.state >>> 0;
-    }
-
-    sequence(count) {
-        this.state = this.seed;
-
-        const indices =
-            Array.from(
-                { length: Math.max(1, count) },
-                (_, i) => i
-            );
-
-        for (
-            let current = indices.length - 1;
-            current > 0;
-            current--
-        ) {
-            const randomIndex =
-                this.next() % (current + 1);
-
-            [
-                indices[current],
-                indices[randomIndex]
-            ] = [
-                indices[randomIndex],
-                indices[current]
-            ];
+            if (
+                Number.isInteger(columns) &&
+                Number.isInteger(rows) &&
+                columns > 0 &&
+                rows > 0
+            ) {
+                return {
+                    columns,
+                    rows
+                };
+            }
         }
 
-        return indices;
-    }
-}
-
-/*
- * MangaDenizi's XOR decrypt.
- *
- * The current reader uses the X-Scramble-Key response
- * header as a one-byte XOR key.
- */
-function decryptXOR(buffer, key) {
-    const data = Buffer.from(buffer);
-
-    const value =
-        Number(key) & 0xff;
-
-    for (let i = 0; i < data.length; i++) {
-        data[i] ^= value;
+        return null;
     }
 
-    return data;
-}
-
-/*
- * Calculate the regions exactly like MangaDenizi.
- */
-function splitDimension(totalSize, regionCount) {
-    const size =
-        Math.max(1, Math.floor(totalSize));
-
-    const count =
-        Math.max(
-            1,
-            Math.min(
-                Math.floor(regionCount) || 1,
-                size
-            )
-        );
-
-    const regions = [];
-
-    for (
-        let regionIndex = 0;
-        regionIndex < count;
-        regionIndex++
+    if (
+        typeof grid === "object"
     ) {
-        const startOffset =
-            Math.floor(
-                regionIndex * size / count
+
+        const columns =
+            Number(
+                grid.columns ??
+                grid.cols ??
+                grid.x ??
+                grid.width
             );
 
-        const endOffset =
-            Math.floor(
-                (regionIndex + 1) *
-                size / count
+        const rows =
+            Number(
+                grid.rows ??
+                grid.y ??
+                grid.height
             );
 
-        regions.push({
-            offset: startOffset,
-            length:
-                Math.max(
-                    1,
-                    endOffset - startOffset
-                )
-        });
+        if (
+            Number.isInteger(columns) &&
+            Number.isInteger(rows) &&
+            columns > 0 &&
+            rows > 0
+        ) {
+            return {
+                columns,
+                rows
+            };
+        }
     }
 
-    return regions;
+    return null;
 }
 
 /*
- * Tiled-v1 descrambling.
+ * Reconstruct a MangaDenizi tiled-v1 image.
  *
- * Uses sharp to crop the scrambled tiles and
- * composite them into their original positions.
+ * The original image is divided into:
+ *
+ *   columns
+ *   rows
+ *
+ * regions.
+ *
+ * The columns and rows are independently
+ * shuffled using the MangaDenizi PRNG.
  */
-async function decryptTiledV1(
-    inputBuffer,
+async function untileImage(
+    buffer,
     seed,
-    grid,
-    sharp
+    grid
 ) {
+
+    const parsedGrid =
+        parseGrid(grid);
+
+    if (!parsedGrid) {
+        throw new Error(
+            "Invalid MangaDenizi tile grid."
+        );
+    }
+
+    const {
+        columns,
+        rows
+    } = parsedGrid;
+
+    if (
+        columns <= 0 ||
+        rows <= 0
+    ) {
+        throw new Error(
+            "Invalid MangaDenizi tile dimensions."
+        );
+    }
+
     const metadata =
-        await sharp(inputBuffer).metadata();
+        await sharp(buffer)
+            .metadata();
 
     const width =
-        Math.max(
-            1,
-            Math.floor(metadata.width || 1)
-        );
+        metadata.width;
 
     const height =
-        Math.max(
-            1,
-            Math.floor(metadata.height || 1)
-        );
+        metadata.height;
 
-    const gridSize =
-        Math.max(
-            1,
-            Math.min(
-                Math.floor(grid) || 1,
-                width,
-                height
-            )
+    if (
+        !width ||
+        !height
+    ) {
+        throw new Error(
+            "Could not determine image dimensions."
         );
+    }
 
-    const columns =
-        splitDimension(
-            width,
-            gridSize
-        );
+    /*
+     * MangaDenizi's current salts.
+     */
+    const COLUMN_SALT =
+        0x85EBCA6B;
 
-    const rows =
-        splitDimension(
-            height,
-            gridSize
-        );
+    const ROW_SALT =
+        0x9E3779B9;
 
-    const shuffledColumns =
-        new PRNG(
+    const columnShuffle =
+        makeShuffle(
+            columns,
             seed,
-            0x85EBCA6B
-        ).sequence(gridSize);
+            COLUMN_SALT
+        );
 
-    const shuffledRows =
-        new PRNG(
+    const rowShuffle =
+        makeShuffle(
+            rows,
             seed,
-            0x9E3779B9
-        ).sequence(gridSize);
+            ROW_SALT
+        );
 
-    const composites = [];
+    /*
+     * Extract all scrambled regions.
+     */
+    const tiles = [];
 
     for (
-        let row = 0;
-        row < gridSize;
-        row++
+        let sourceRow = 0;
+        sourceRow < rows;
+        sourceRow++
     ) {
-        const srcY = rows[row];
 
-        const dstY =
-            rows[shuffledRows[row]];
+        const sourceTop =
+            Math.floor(
+                sourceRow *
+                height /
+                rows
+            );
+
+        const sourceBottom =
+            Math.floor(
+                (sourceRow + 1) *
+                height /
+                rows
+            );
+
+        const sourceHeight =
+            sourceBottom -
+            sourceTop;
 
         for (
-            let column = 0;
-            column < gridSize;
-            column++
+            let sourceColumn = 0;
+            sourceColumn < columns;
+            sourceColumn++
         ) {
-            const srcX =
-                columns[column];
 
-            const dstX =
-                columns[
-                    shuffledColumns[column]
-                ];
+            const sourceLeft =
+                Math.floor(
+                    sourceColumn *
+                    width /
+                    columns
+                );
 
-            /*
-             * Crop the source tile.
-             */
+            const sourceRight =
+                Math.floor(
+                    (sourceColumn + 1) *
+                    width /
+                    columns
+                );
+
+            const sourceWidth =
+                sourceRight -
+                sourceLeft;
+
+            if (
+                sourceWidth <= 0 ||
+                sourceHeight <= 0
+            ) {
+                continue;
+            }
+
             const tile =
-                await sharp(inputBuffer)
+                await sharp(buffer)
                     .extract({
-                        left: srcX.offset,
-                        top: srcY.offset,
-                        width: srcX.length,
-                        height: srcY.length
+                        left: sourceLeft,
+                        top: sourceTop,
+                        width: sourceWidth,
+                        height: sourceHeight
                     })
+                    .png()
                     .toBuffer();
 
-            composites.push({
-                input: tile,
-                left: dstX.offset,
-                top: dstY.offset
+            tiles.push({
+                sourceRow,
+                sourceColumn,
+                buffer: tile,
+                width: sourceWidth,
+                height: sourceHeight
             });
         }
     }
 
     /*
      * Rebuild the image.
+     *
+     * The shuffled sequence tells us where each
+     * scrambled source region originally belongs.
      */
-    return await sharp({
+    const composites = [];
+
+    for (
+        const tile of tiles
+    ) {
+
+        const destinationColumn =
+            columnShuffle[
+                tile.sourceColumn
+            ];
+
+        const destinationRow =
+            rowShuffle[
+                tile.sourceRow
+            ];
+
+        const left =
+            Math.floor(
+                destinationColumn *
+                width /
+                columns
+            );
+
+        const top =
+            Math.floor(
+                destinationRow *
+                height /
+                rows
+            );
+
+        composites.push({
+            input: tile.buffer,
+            left,
+            top
+        });
+    }
+
+    return sharp({
         create: {
             width,
             height,
             channels: 4,
             background: {
-                r: 0,
-                g: 0,
-                b: 0,
-                alpha: 0
+                r: 255,
+                g: 255,
+                b: 255,
+                alpha: 1
             }
         }
     })
@@ -451,218 +520,653 @@ async function decryptTiledV1(
 }
 
 /*
- * Download and descramble one MangaDenizi image.
+ * Process one MangaDenizi reader image.
  *
- * This function is exported so the API server can use it
- * for the /api/manga/image endpoint.
+ * Handles:
+ *
+ *   xor
+ *   tiled-v1
+ *   normal/unscrambled
  */
 async function processImage(
     imageUrl,
-    scramble = {},
-    sharp
+    scramble = {}
 ) {
-    const response =
-        await axios.get(
-            imageUrl,
-            {
-                responseType: "arraybuffer",
-                timeout: 30000,
-                maxRedirects: 5,
-                headers: {
-                    "User-Agent":
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-                        "AppleWebKit/537.36 (KHTML, like Gecko) " +
-                        "Chrome/139.0.0.0 Safari/537.36",
-                    "Referer":
-                        `${BASE_URL}/`
-                }
-            }
+
+    /*
+     * Sharp is intentionally available here.
+     * The index.js calls:
+     *
+     * source.processImage(url, scramble)
+     */
+    const sharp = require("sharp");
+
+    if (!imageUrl) {
+        throw new Error(
+            "Missing MangaDenizi image URL."
         );
-
-    const algorithm =
-        scramble.method ||
-        response.headers[
-            "x-scramble-method"
-        ] ||
-        response.headers[
-            "x-scrambled-method"
-        ];
-
-    if (algorithm === "xor") {
-        const key =
-            scramble.key !== undefined
-                ? scramble.key
-                : parseInt(
-                    response.headers[
-                        "x-scramble-key"
-                    ],
-                    10
-                );
-
-        if (!Number.isFinite(key)) {
-            throw new Error(
-                "MangaDenizi XOR image has no scramble key."
-            );
-        }
-
-        return {
-            buffer: decryptXOR(
-                response.data,
-                key
-            ),
-            contentType:
-                response.headers["content-type"] ||
-                "image/jpeg"
-        };
     }
 
-    if (algorithm === "tiled-v1") {
-        const seed =
-            scramble.seed !== undefined
-                ? scramble.seed
-                : parseInt(
-                    response.headers[
-                        "x-scramble-seed"
-                    ],
-                    10
-                );
+    let response;
 
-        const grid =
-            scramble.grid !== undefined
-                ? scramble.grid
-                : parseInt(
-                    response.headers[
-                        "x-scramble-grid"
-                    ],
-                    10
-                );
+    try {
 
-        if (
-            !Number.isFinite(seed) ||
-            !Number.isFinite(grid)
-        ) {
-            throw new Error(
-                "MangaDenizi tiled image is missing seed/grid."
+        response =
+            await axios.get(
+                imageUrl,
+                {
+                    responseType:
+                        "arraybuffer",
+
+                    timeout:
+                        30000,
+
+                    maxRedirects:
+                        5,
+
+                    headers: {
+                        "User-Agent":
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+                            "AppleWebKit/537.36 (KHTML, like Gecko) " +
+                            "Chrome/139.0.0.0 Safari/537.36",
+
+                        "Accept":
+                            "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+
+                        "Referer":
+                            `${BASE_URL}/`
+                    }
+                }
             );
-        }
 
-        const buffer =
-            await decryptTiledV1(
-                response.data,
-                seed,
-                grid,
-                sharp
+    } catch (error) {
+
+        throw new Error(
+            `Failed to download MangaDenizi image: ${error.message}`
+        );
+    }
+
+    let buffer =
+        Buffer.from(
+            response.data
+        );
+
+    const headers =
+        response.headers || {};
+
+    /*
+     * Payload can contain the scramble
+     * information.
+     *
+     * Response headers are fallback values.
+     */
+    const method =
+        String(
+            scramble.method ||
+            headers["x-scramble-method"] ||
+            ""
+        )
+            .trim()
+            .toLowerCase();
+
+    /*
+     * XOR
+     */
+    if (method === "xor") {
+
+        const key =
+            scramble.key ??
+            scramble.seed ??
+            headers["x-scramble-key"];
+
+        buffer =
+            xorBuffer(
+                buffer,
+                key
             );
 
         return {
             buffer,
-            contentType: "image/png"
+            contentType:
+                "image/png"
         };
     }
 
     /*
-     * Unscrambled image.
+     * Tiled-v1
      */
-    return {
-        buffer: Buffer.from(
-            response.data
-        ),
-        contentType:
-            response.headers["content-type"] ||
-            "image/jpeg"
-    };
-}
+    if (
+        method === "tiled-v1" ||
+        method === "tiled"
+    ) {
 
-async function getChapter(title, chapter) {
-    if (!title) {
-        throw new Error(
-            "Manga title is required."
-        );
+        const seed =
+            parseSeed(
+                scramble.seed ??
+                headers["x-scramble-seed"]
+            );
+
+        const grid =
+            parseGrid(
+                scramble.grid ||
+                (
+                    headers[
+                        "x-scramble-grid"
+                    ]
+                    ? headers[
+                        "x-scramble-grid"
+                    ]
+                    : null
+                )
+            );
+
+        if (seed === null) {
+
+            throw new Error(
+                "MangaDenizi tiled-v1 image is missing its scramble seed."
+            );
+        }
+
+        if (!grid) {
+
+            throw new Error(
+                "MangaDenizi tiled-v1 image is missing its scramble grid."
+            );
+        }
+
+        buffer =
+            await untileImage(
+                buffer,
+                seed,
+                grid
+            );
+
+        return {
+            buffer,
+            contentType:
+                "image/png"
+        };
     }
+
+    /*
+     * If MangaDenizi didn't specify a scramble
+     * method, return the original image.
+     */
+    let contentType =
+        headers["content-type"];
 
     if (
-        chapter === undefined ||
-        chapter === null ||
-        String(chapter).trim() === ""
+        !contentType ||
+        !String(contentType)
+            .toLowerCase()
+            .startsWith("image/")
     ) {
-        throw new Error(
-            "Chapter number is required."
-        );
+
+        try {
+
+            const metadata =
+                await sharp(buffer)
+                    .metadata();
+
+            if (
+                metadata.format === "webp"
+            ) {
+                contentType =
+                    "image/webp";
+            } else if (
+                metadata.format === "jpeg"
+            ) {
+                contentType =
+                    "image/jpeg";
+            } else if (
+                metadata.format === "png"
+            ) {
+                contentType =
+                    "image/png";
+            } else {
+                contentType =
+                    "image/png";
+            }
+
+        } catch {
+            contentType =
+                "image/png";
+        }
     }
-
-    /*
-     * Find manga.
-     */
-    const manga =
-        await findManga(title);
-
-    if (!manga) {
-        throw new Error(
-            `Manga "${title}" was not found on MangaDenizi.`
-        );
-    }
-
-    /*
-     * Get chapter list.
-     */
-    const chapters =
-        await getChapters(manga);
-
-    /*
-     * Find exact chapter.
-     */
-    const selected =
-        chapters.find(item =>
-            numberEqual(
-                item.number,
-                chapter
-            )
-        );
-
-    if (!selected) {
-        throw new Error(
-            `Chapter ${chapter} was not found for "${manga.title}" on MangaDenizi.`
-        );
-    }
-
-    /*
-     * Get reader payload.
-     */
-    const readerPages =
-        await getPayload(
-            manga.slug,
-            selected.slug
-        );
-
-    if (!readerPages.length) {
-        throw new Error(
-            `MangaDenizi returned no pages for "${manga.title}" chapter ${chapter}.`
-        );
-    }
-
-    /*
-     * We don't return the raw image URLs directly.
-     *
-     * The API server will expose a proxy endpoint that
-     * descrambles them before manga.js downloads them.
-     */
-    const pages =
-        readerPages.map(page => ({
-            image_url: page.image_url,
-            scramble: page.scramble || {}
-        }));
 
     return {
-        success: true,
-        title: manga.title,
-        chapter: String(chapter),
-        source: "MangaDenizi",
-        pages
+        buffer,
+        contentType
     };
 }
 
+/*
+ * Find a MangaDenizi manga.
+ *
+ * First tries the paginated public API.
+ * Then falls back to a direct slug.
+ */
+async function findManga(
+    mangaName
+) {
+
+    const wanted =
+        normalize(mangaName);
+
+    if (!wanted) {
+        return null;
+    }
+
+    /*
+     * Try several pages of the public manga API.
+     */
+    for (
+        let page = 1;
+        page <= 10;
+        page++
+    ) {
+
+        try {
+
+            const response =
+                await apiGet(
+                    `${API_BASE}/manga?page=${page}`
+                );
+
+            const mangas =
+                response.data?.data?.mangas ||
+                response.data?.data?.items ||
+                response.data?.mangas ||
+                [];
+
+            if (
+                !Array.isArray(mangas)
+            ) {
+                continue;
+            }
+
+            for (
+                const manga of mangas
+            ) {
+
+                const title =
+                    manga.title ||
+                    manga.name ||
+                    "";
+
+                const slug =
+                    manga.slug ||
+                    "";
+
+                if (!slug) {
+                    continue;
+                }
+
+                const normalizedTitle =
+                    normalize(title);
+
+                const normalizedSlug =
+                    normalize(slug);
+
+                if (
+                    normalizedTitle === wanted ||
+                    normalizedSlug === wanted
+                ) {
+                    return {
+                        title,
+                        slug
+                    };
+                }
+            }
+
+        } catch (error) {
+
+            console.log(
+                `[${SOURCE_NAME}] Manga list page ${page} failed: ${error.message}`
+            );
+        }
+    }
+
+    /*
+     * Direct slug fallback.
+     */
+    const possibleSlugs = [
+        slugify(mangaName),
+        String(mangaName)
+            .trim()
+            .toLowerCase()
+            .replace(/\s+/g, "-")
+    ];
+
+    for (
+        const slug of possibleSlugs
+    ) {
+
+        if (!slug) {
+            continue;
+        }
+
+        try {
+
+            const response =
+                await apiGet(
+                    `${API_BASE}/manga/${encodeURIComponent(slug)}`
+                );
+
+            const manga =
+                response.data?.data?.manga;
+
+            if (manga) {
+
+                return {
+                    title:
+                        manga.title ||
+                        manga.name ||
+                        mangaName,
+
+                    slug:
+                        manga.slug ||
+                        slug
+                };
+            }
+
+        } catch {
+            // Try next possible slug.
+        }
+    }
+
+    return null;
+}
+
+/*
+ * Get chapter list.
+ */
+async function getChapters(
+    manga
+) {
+
+    const response =
+        await apiGet(
+            `${API_BASE}/manga/${encodeURIComponent(manga.slug)}`
+        );
+
+    const chapters =
+        response.data?.data?.manga?.chapters ||
+        [];
+
+    if (
+        !Array.isArray(chapters)
+    ) {
+        return [];
+    }
+
+    return chapters;
+}
+
+/*
+ * Compare chapter numbers safely.
+ */
+function chapterMatches(
+    chapter,
+    requested
+) {
+
+    const requestedText =
+        String(requested)
+            .trim();
+
+    const number =
+        chapter?.number;
+
+    if (
+        number !== undefined &&
+        number !== null
+    ) {
+
+        if (
+            String(number)
+                .trim() ===
+            requestedText
+        ) {
+            return true;
+        }
+
+        const a =
+            Number(number);
+
+        const b =
+            Number(requested);
+
+        if (
+            Number.isFinite(a) &&
+            Number.isFinite(b) &&
+            a === b
+        ) {
+            return true;
+        }
+    }
+
+    const title =
+        String(
+            chapter?.title ||
+            ""
+        );
+
+    const slug =
+        String(
+            chapter?.slug ||
+            ""
+        );
+
+    const combined =
+        `${title} ${slug}`;
+
+    const requestedNumber =
+        Number(requested);
+
+    if (
+        Number.isFinite(requestedNumber)
+    ) {
+
+        const matches =
+            combined.match(
+                /(?:chapter|chap|bolum|bölüm)[^\d]*(\d+(?:\.\d+)?)/i
+            );
+
+        if (matches) {
+
+            const found =
+                Number(matches[1]);
+
+            if (
+                found ===
+                requestedNumber
+            ) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+/*
+ * Get the reader payload.
+ */
+async function getReaderPayload(
+    manga,
+    chapter
+) {
+
+    const url =
+        `${API_BASE}/read/` +
+        `${encodeURIComponent(manga.slug)}/` +
+        `${encodeURIComponent(chapter.slug)}/payload`;
+
+    const response =
+        await apiGet(url);
+
+    return response.data;
+}
+
+/*
+ * Public source interface.
+ */
 module.exports = {
-    name: "MangaDenizi",
-    getChapter,
+
+    name: SOURCE_NAME,
+
+    async getChapter(
+        mangaName,
+        chapterNumber
+    ) {
+
+        console.log(
+            `[${SOURCE_NAME}] Searching: ${mangaName} chapter ${chapterNumber}`
+        );
+
+        const manga =
+            await findManga(
+                mangaName
+            );
+
+        if (!manga) {
+
+            throw new Error(
+                `Manga "${mangaName}" was not found on MangaDenizi.`
+            );
+        }
+
+        console.log(
+            `[${SOURCE_NAME}] Found manga: ${manga.title} (${manga.slug})`
+        );
+
+        const chapters =
+            await getChapters(
+                manga
+            );
+
+        if (
+            !chapters.length
+        ) {
+
+            throw new Error(
+                `No chapters found for "${manga.title}" on MangaDenizi.`
+            );
+        }
+
+        const chapter =
+            chapters.find(
+                item =>
+                    chapterMatches(
+                        item,
+                        chapterNumber
+                    )
+            );
+
+        if (!chapter) {
+
+            throw new Error(
+                `Chapter ${chapterNumber} was not found for "${manga.title}" on MangaDenizi.`
+            );
+        }
+
+        console.log(
+            `[${SOURCE_NAME}] Found chapter: ` +
+            `${chapter.title || chapter.number} ` +
+            `(${chapter.slug})`
+        );
+
+        const payload =
+            await getReaderPayload(
+                manga,
+                chapter
+            );
+
+        const pages =
+            Array.isArray(
+                payload?.pages
+            )
+                ? payload.pages
+                : [];
+
+        if (!pages.length) {
+
+            throw new Error(
+                `MangaDenizi returned no reader pages for "${manga.title}" chapter ${chapterNumber}.`
+            );
+        }
+
+        /*
+         * Keep scramble information attached to
+         * every page. index.js will turn these
+         * objects into temporary proxy URLs.
+         */
+        const normalizedPages =
+            pages
+                .map(page => {
+
+                    if (
+                        typeof page === "string"
+                    ) {
+
+                        return {
+                            image_url:
+                                page,
+
+                            scramble: {}
+                        };
+                    }
+
+                    return {
+                        image_url:
+                            page?.image_url ||
+                            page?.url ||
+                            page?.src ||
+                            "",
+
+                        scramble:
+                            page?.scramble ||
+                            {}
+                    };
+                })
+                .filter(
+                    page =>
+                        page.image_url
+                );
+
+        if (
+            !normalizedPages.length
+        ) {
+
+            throw new Error(
+                "MangaDenizi reader returned pages, but no usable image URLs were found."
+            );
+        }
+
+        return {
+
+            title:
+                manga.title ||
+                mangaName,
+
+            chapter:
+                String(
+                    chapter.number ??
+                    chapter.title ??
+                    chapterNumber
+                ),
+
+            source:
+                SOURCE_NAME,
+
+            pages:
+                normalizedPages
+        };
+    },
+
+    /*
+     * Used by the API's MangaDenizi image proxy.
+     */
     processImage
 };
