@@ -1,4 +1,6 @@
 const puppeteer = require("puppeteer");
+const fs = require("fs");
+const path = require("path");
 
 const BASE_URL = "https://www.mangakakalot.gg";
 
@@ -21,36 +23,123 @@ function slugify(title) {
         .replace(/^-|-$/g, "");
 }
 
-function validImage(url) {
+/*
+ * Try Puppeteer's configured browser cache first.
+ */
+function findChrome() {
+    const cacheDir =
+        process.env.PUPPETEER_CACHE_DIR ||
+        path.join(
+            process.env.HOME || "/tmp",
+            ".cache",
+            "puppeteer"
+        );
+
+    const possiblePaths = [
+        // Puppeteer Chrome
+        path.join(
+            cacheDir,
+            "chrome",
+            "linux-148.0.7778.97",
+            "chrome-linux64",
+            "chrome"
+        ),
+
+        // Other common Puppeteer layouts
+        path.join(
+            cacheDir,
+            "chrome",
+            "linux-147.0.7727.63",
+            "chrome-linux64",
+            "chrome"
+        ),
+
+        path.join(
+            cacheDir,
+            "chrome",
+            "linux-146.0.7680.153",
+            "chrome-linux64",
+            "chrome"
+        ),
+
+        // Render/system Chrome locations
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser"
+    ];
+
+    for (const executable of possiblePaths) {
+        try {
+            if (
+                fs.existsSync(executable) &&
+                fs.statSync(executable).isFile()
+            ) {
+                console.log(
+                    `[MangaKakalot] Chrome found: ${executable}`
+                );
+
+                return executable;
+            }
+        } catch {}
+    }
+
+    return null;
+}
+
+function isMangaImage(url) {
     if (!url) return false;
 
     const lower = url.toLowerCase();
 
     if (
-        !(
-            lower.includes("2xstorage.com") ||
-            lower.includes("waitst.com")
-        )
+        lower.startsWith("data:") ||
+        lower.includes("logo") ||
+        lower.includes("icon") ||
+        lower.includes("avatar") ||
+        lower.includes("banner") ||
+        lower.includes("advert")
     ) {
         return false;
     }
 
-    return /\.(webp|jpg|jpeg|png)(?:\?|$)/i.test(lower);
+    /*
+     * Accept normal image extensions.
+     */
+    if (
+        /\.(webp|jpg|jpeg|png)(?:[?#].*)?$/i.test(lower)
+    ) {
+        return true;
+    }
+
+    /*
+     * Some reader CDNs don't expose the extension cleanly.
+     */
+    if (
+        lower.includes("2xstorage") ||
+        lower.includes("waitst") ||
+        lower.includes("chapter") ||
+        lower.includes("/manga/")
+    ) {
+        return true;
+    }
+
+    return false;
 }
 
 function sortPages(pages) {
     return pages.sort((a, b) => {
-        const getNumber = url => {
+        function number(url) {
             const match = url.match(
-                /(?:\/|_)(\d+)\.(?:webp|jpg|jpeg|png)/i
+                /(?:\/|_|-)(\d+)\.(?:webp|jpg|jpeg|png)(?:[?#].*)?$/i
             );
 
             return match
                 ? Number(match[1])
                 : Number.MAX_SAFE_INTEGER;
-        };
+        }
 
-        return getNumber(a) - getNumber(b);
+        return number(a) - number(b);
     });
 }
 
@@ -69,20 +158,33 @@ async function getChapter(title, chapter) {
     const url =
         `${BASE_URL}/manga/${slug}/chapter-${chapterNumber}`;
 
-    let browser;
+    let browser = null;
 
     try {
+        const executablePath = findChrome();
+
+        if (!executablePath) {
+            throw new Error(
+                "Chrome executable was not found. " +
+                "Puppeteer browser installation is missing."
+            );
+        }
+
         browser = await puppeteer.launch({
             headless: true,
+            executablePath,
 
             args: [
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
+                "--disable-software-rasterizer",
                 "--no-first-run",
                 "--no-zygote",
-                "--single-process"
+                "--disable-background-networking",
+                "--disable-background-timer-throttling",
+                "--disable-renderer-backgrounding"
             ]
         });
 
@@ -95,9 +197,9 @@ async function getChapter(title, chapter) {
         });
 
         await page.setUserAgent(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+            "Mozilla/5.0 (X11; Linux x86_64) " +
             "AppleWebKit/537.36 (KHTML, like Gecko) " +
-            "Chrome/139.0.0.0 Safari/537.36"
+            "Chrome/148.0.0.0 Safari/537.36"
         );
 
         await page.setExtraHTTPHeaders({
@@ -105,8 +207,8 @@ async function getChapter(title, chapter) {
         });
 
         /*
-         * Block unnecessary resources.
-         * Images are intentionally NOT blocked.
+         * Don't block images.
+         * Only block unnecessary heavy resources.
          */
         await page.setRequestInterception(true);
 
@@ -116,7 +218,7 @@ async function getChapter(title, chapter) {
             if (
                 type === "font" ||
                 type === "media" ||
-                type === "manifest"
+                type === "websocket"
             ) {
                 request.abort();
             } else {
@@ -125,48 +227,61 @@ async function getChapter(title, chapter) {
         });
 
         console.log(
-            `[MangaKakalot] Opening ${url}`
+            `[MangaKakalot] Opening: ${url}`
         );
 
-        await page.goto(url, {
+        const response = await page.goto(url, {
             waitUntil: "domcontentloaded",
             timeout: 60000
         });
 
-        /*
-         * Give Cloudflare / JavaScript time to finish.
-         */
-        await new Promise(resolve =>
-            setTimeout(resolve, 5000)
+        console.log(
+            `[MangaKakalot] HTTP status: ${
+                response ? response.status() : "unknown"
+            }`
         );
 
         /*
-         * Scroll through the reader.
-         * Some reader pages lazy-load images.
+         * Wait for JavaScript / Cloudflare.
+         */
+        await new Promise(resolve =>
+            setTimeout(resolve, 6000)
+        );
+
+        /*
+         * Scroll gradually to trigger lazy loading.
          */
         await page.evaluate(async () => {
             await new Promise(resolve => {
-                let total = 0;
+                let lastHeight = 0;
+                let stableCount = 0;
 
                 const timer = setInterval(() => {
                     window.scrollBy(
                         0,
                         Math.max(
-                            window.innerHeight,
-                            800
+                            window.innerHeight * 0.8,
+                            700
                         )
                     );
 
-                    total += 800;
+                    const height =
+                        document.body
+                            ? document.body.scrollHeight
+                            : 0;
 
-                    if (
-                        total >=
-                        document.body.scrollHeight + 5000
-                    ) {
+                    if (height === lastHeight) {
+                        stableCount++;
+                    } else {
+                        stableCount = 0;
+                        lastHeight = height;
+                    }
+
+                    if (stableCount >= 5) {
                         clearInterval(timer);
                         resolve();
                     }
-                }, 150);
+                }, 300);
             });
         });
 
@@ -175,7 +290,14 @@ async function getChapter(title, chapter) {
         );
 
         /*
-         * Extract every image visible to the browser.
+         * Extract images from:
+         * img.src
+         * img.currentSrc
+         * data-src
+         * data-original
+         * data-lazy-src
+         * data-url
+         * srcset
          */
         const images = await page.evaluate(() => {
             const found = new Set();
@@ -199,13 +321,60 @@ async function getChapter(title, chapter) {
                 .forEach(img => {
                     add(img.src);
                     add(img.currentSrc);
-                    add(img.getAttribute("data-src"));
-                    add(img.getAttribute("data-original"));
-                    add(img.getAttribute("data-lazy-src"));
-                    add(img.getAttribute("data-url"));
+
+                    add(
+                        img.getAttribute("data-src")
+                    );
+
+                    add(
+                        img.getAttribute("data-original")
+                    );
+
+                    add(
+                        img.getAttribute("data-lazy-src")
+                    );
+
+                    add(
+                        img.getAttribute("data-url")
+                    );
+
+                    add(
+                        img.getAttribute("data-image")
+                    );
 
                     const srcset =
                         img.getAttribute("srcset");
+
+                    if (srcset) {
+                        srcset
+                            .split(",")
+                            .forEach(item => {
+                                const value =
+                                    item
+                                        .trim()
+                                        .split(/\s+/)[0];
+
+                                add(value);
+                            });
+                    }
+                });
+
+            /*
+             * Also inspect picture/source elements.
+             */
+            document
+                .querySelectorAll("source")
+                .forEach(source => {
+                    add(
+                        source.getAttribute("src")
+                    );
+
+                    add(
+                        source.getAttribute("data-src")
+                    );
+
+                    const srcset =
+                        source.getAttribute("srcset");
 
                     if (srcset) {
                         srcset
@@ -223,12 +392,8 @@ async function getChapter(title, chapter) {
             return Array.from(found);
         });
 
-        const pages = sortPages(
-            images.filter(validImage)
-        );
-
         /*
-         * Detect Cloudflare/access page.
+         * Get page text for Cloudflare detection.
          */
         const pageText = await page.evaluate(() =>
             document.body
@@ -237,33 +402,74 @@ async function getChapter(title, chapter) {
         );
 
         const blocked =
-            /checking your browser|verify you are human|just a moment|cloudflare/i
+            /checking your browser|verify you are human|just a moment|attention required|cloudflare/i
                 .test(pageText);
 
-        if (blocked && pages.length === 0) {
+        /*
+         * Filter and deduplicate.
+         */
+        const pages = sortPages(
+            [...new Set(
+                images.filter(isMangaImage)
+            )]
+        );
+
+        console.log(
+            `[MangaKakalot] Images discovered: ${images.length}`
+        );
+
+        console.log(
+            `[MangaKakalot] Valid pages: ${pages.length}`
+        );
+
+        if (
+            blocked &&
+            pages.length === 0
+        ) {
             throw new Error(
-                "MangaKakalot Cloudflare challenge blocked the browser."
+                "MangaKakalot Cloudflare/browser verification blocked the request."
             );
         }
 
         if (pages.length === 0) {
             throw new Error(
-                `MangaKakalot opened the chapter page but no reader images were found. URL: ${url}`
+                `No manga pages found on MangaKakalot for "${title}" chapter ${chapterNumber}.`
             );
         }
 
+        /*
+         * Remove obvious duplicate URLs.
+         */
+        const uniquePages = [];
+
+        const seen = new Set();
+
+        for (const image of pages) {
+            const clean =
+                image.split("#")[0];
+
+            if (!seen.has(clean)) {
+                seen.add(clean);
+                uniquePages.push(image);
+            }
+        }
+
         console.log(
-            `[MangaKakalot] Found ${pages.length} pages`
+            `[MangaKakalot] Final pages: ${uniquePages.length}`
         );
 
         return {
             title,
             chapter: chapterNumber,
             source: "MangaKakalot",
-            pages
+            pages: uniquePages
         };
 
     } catch (error) {
+        console.error(
+            `[MangaKakalot] ${error.message}`
+        );
+
         throw new Error(
             error.message ||
             "MangaKakalot browser request failed."
