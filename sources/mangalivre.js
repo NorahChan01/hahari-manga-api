@@ -13,8 +13,9 @@ const client = axios.create({
     maxRedirects: 5,
     headers: {
         "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-            "(KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+            "AppleWebKit/537.36 (KHTML, like Gecko) " +
+            "Chrome/139.0.0.0 Safari/537.36",
         "Accept":
             "text/html,application/xhtml+xml,application/xml;q=0.9," +
             "image/avif,image/webp,*/*;q=0.8",
@@ -71,31 +72,14 @@ function absoluteUrl(url) {
     }
 }
 
-async function request(url, extraHeaders = {}) {
+async function request(url, headers = {}) {
     const response = await client.get(url, {
         headers: {
-            ...extraHeaders
+            ...headers
         }
     });
 
     return response.data;
-}
-
-function extractAttribute(html, tag, attribute) {
-    const results = [];
-
-    const regex = new RegExp(
-        `<${tag}\\b[^>]*\\b${attribute}\\s*=\\s*["']([^"']+)["'][^>]*>`,
-        "gi"
-    );
-
-    let match;
-
-    while ((match = regex.exec(html))) {
-        results.push(match[1]);
-    }
-
-    return results;
 }
 
 function extractLinks(html) {
@@ -107,19 +91,34 @@ function extractLinks(html) {
     let match;
 
     while ((match = regex.exec(html))) {
-        const href = absoluteUrl(match[1]);
+        const url = absoluteUrl(match[1]);
 
-        if (!href) continue;
-
-        const text = cleanText(match[2]);
+        if (!url) continue;
 
         links.push({
-            url: href,
-            text
+            url,
+            text: cleanText(match[2])
         });
     }
 
     return links;
+}
+
+function extractAttribute(html, tag, attribute) {
+    const values = [];
+
+    const regex = new RegExp(
+        `<${tag}\\b[^>]*\\b${attribute}\\s*=\\s*["']([^"']+)["'][^>]*>`,
+        "gi"
+    );
+
+    let match;
+
+    while ((match = regex.exec(html))) {
+        values.push(match[1]);
+    }
+
+    return values;
 }
 
 function extractTitle(html) {
@@ -129,7 +128,10 @@ function extractTitle(html) {
 
     if (match) {
         const title = cleanText(match[1]);
-        if (title) return title;
+
+        if (title) {
+            return title;
+        }
     }
 
     match = html.match(
@@ -138,7 +140,10 @@ function extractTitle(html) {
 
     if (match) {
         const title = cleanText(match[1]);
-        if (title) return title;
+
+        if (title) {
+            return title;
+        }
     }
 
     match = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
@@ -171,7 +176,9 @@ function extractChapterNumber(text) {
 }
 
 function chaptersEqual(a, b) {
-    if (a == null || b == null) return false;
+    if (a == null || b == null) {
+        return false;
+    }
 
     const na = Number(String(a).replace(",", "."));
     const nb = Number(String(b).replace(",", "."));
@@ -186,35 +193,49 @@ function chaptersEqual(a, b) {
 function extractImageUrls(html) {
     const images = [];
 
-    // Normal <img src="">
-    const imgSrcs = extractAttribute(html, "img", "src");
-
-    // Lazy-loaded images
-    const lazySrcs = [
-        ...extractAttribute(html, "img", "data-src"),
-        ...extractAttribute(html, "img", "data-lazy-src"),
-        ...extractAttribute(html, "img", "data-original"),
-        ...extractAttribute(html, "img", "data-url")
+    const attributes = [
+        "src",
+        "data-src",
+        "data-lazy-src",
+        "data-original",
+        "data-url"
     ];
 
-    const all = [...imgSrcs, ...lazySrcs];
+    for (const attribute of attributes) {
+        const values = extractAttribute(
+            html,
+            "img",
+            attribute
+        );
 
-    for (const raw of all) {
-        const url = absoluteUrl(raw);
+        for (const value of values) {
+            const url = absoluteUrl(value);
 
-        if (!url) continue;
+            if (!url) continue;
 
-        if (!/\.(?:jpe?g|png|webp|avif|gif)(?:[?#].*)?$/i.test(url)) {
-            continue;
+            /*
+             * MangaLivre may use query strings after the image
+             * extension, so don't require the extension to be
+             * the absolute end of the URL.
+             */
+            if (
+                !/\.(?:jpe?g|png|webp|avif|gif)(?:[?#].*)?$/i.test(
+                    url
+                )
+            ) {
+                continue;
+            }
+
+            if (
+                /logo|avatar|favicon|icon|banner|advertisement|ads?/i.test(
+                    url
+                )
+            ) {
+                continue;
+            }
+
+            images.push(url);
         }
-
-        if (
-            /logo|avatar|favicon|icon|banner|ads?|advertisement/i.test(url)
-        ) {
-            continue;
-        }
-
-        images.push(url);
     }
 
     return [...new Set(images)];
@@ -224,74 +245,75 @@ function extractReaderImages(html) {
     const images = [];
 
     /*
-     * MangaLivre uses a customized Madara reader.
-     * Prefer images inside the actual reading-content container.
+     * Try the actual Madara reader container first.
      */
-
-    const readerBlocks = [];
-
-    const patterns = [
+    const containerPatterns = [
         /<div[^>]*class=["'][^"']*reading-content[^"']*["'][^>]*>([\s\S]*?)<\/div>/gi,
-        /<div[^>]*class=["'][^"']*reading-content[^"']*["'][^>]*>([\s\S]*?)<\/div>/gi,
-        /<div[^>]*id=["']reading-content["'][^>]*>([\s\S]*?)<\/div>/gi
+        /<div[^>]*id=["']reading-content["'][^>]*>([\s\S]*?)<\/div>/gi,
+        /<div[^>]*class=["'][^"']*page-break[^"']*["'][^>]*>([\s\S]*?)<\/div>/gi
     ];
 
-    for (const regex of patterns) {
+    for (const regex of containerPatterns) {
         let match;
 
         while ((match = regex.exec(html))) {
-            readerBlocks.push(match[1]);
+            images.push(
+                ...extractImageUrls(match[1])
+            );
         }
     }
 
-    for (const block of readerBlocks) {
-        images.push(...extractImageUrls(block));
-    }
-
     /*
-     * If the reader container was not detected, fall back to all images.
+     * Fallback: all images on the chapter page.
      */
     if (images.length === 0) {
-        images.push(...extractImageUrls(html));
+        images.push(
+            ...extractImageUrls(html)
+        );
     }
 
     return [...new Set(images)];
 }
 
-function scoreMangaCandidate(candidate, requestedTitle) {
-    const requested = normalizeTitle(requestedTitle);
+function scoreCandidate(candidate, requestedTitle) {
+    const wanted = normalizeTitle(requestedTitle);
     const title = normalizeTitle(candidate.title);
 
     if (!title) return 0;
 
-    if (title === requested) {
+    if (title === wanted) {
         return 1000;
     }
 
     let score = 0;
 
-    if (title.includes(requested)) {
+    if (title.includes(wanted)) {
         score += 500;
     }
 
-    if (requested.includes(title)) {
+    if (wanted.includes(title)) {
         score += 400;
     }
 
-    const requestedWords = requested.split(" ").filter(Boolean);
-    const titleWords = new Set(title.split(" ").filter(Boolean));
+    const wantedWords = wanted
+        .split(" ")
+        .filter(Boolean);
+
+    const titleWords = new Set(
+        title.split(" ").filter(Boolean)
+    );
 
     let matched = 0;
 
-    for (const word of requestedWords) {
+    for (const word of wantedWords) {
         if (titleWords.has(word)) {
             matched++;
         }
     }
 
-    if (requestedWords.length) {
+    if (wantedWords.length > 0) {
         score += Math.round(
-            (matched / requestedWords.length) * 300
+            (matched / wantedWords.length) * 300
         );
     }
 
@@ -320,9 +342,18 @@ async function searchManga(title) {
             const links = extractLinks(html);
 
             for (const link of links) {
-                const parsed = new URL(link.url);
+                let parsed;
 
-                if (parsed.hostname !== new URL(BASE_URL).hostname) {
+                try {
+                    parsed = new URL(link.url);
+                } catch {
+                    continue;
+                }
+
+                if (
+                    parsed.hostname !==
+                    new URL(BASE_URL).hostname
+                ) {
                     continue;
                 }
 
@@ -330,16 +361,19 @@ async function searchManga(title) {
                     continue;
                 }
 
-                const linkTitle =
+                const parts = parsed.pathname
+                    .split("/")
+                    .filter(Boolean);
+
+                const slug =
+                    parts[parts.length - 1] || "";
+
+                const candidateTitle =
                     link.text ||
-                    parsed.pathname
-                        .split("/")
-                        .filter(Boolean)
-                        .pop()
-                        .replace(/[-_]+/g, " ");
+                    slug.replace(/[-_]+/g, " ");
 
                 candidates.push({
-                    title: cleanText(linkTitle),
+                    title: cleanText(candidateTitle),
                     url: link.url
                 });
             }
@@ -348,107 +382,115 @@ async function searchManga(title) {
                 break;
             }
         } catch {
-            // Try next search method.
+            // Try the next search method.
         }
     }
 
     /*
-     * Deduplicate.
+     * Remove duplicates.
      */
     const unique = [];
-
     const seen = new Set();
 
     for (const candidate of candidates) {
-        if (seen.has(candidate.url)) continue;
+        if (seen.has(candidate.url)) {
+            continue;
+        }
 
         seen.add(candidate.url);
         unique.push(candidate);
     }
 
-    if (unique.length === 0) {
-        /*
-         * Direct slug fallback.
-         */
-        const slug = slugify(query);
+    if (unique.length > 0) {
+        unique.sort(
+            (a, b) =>
+                scoreCandidate(b, query) -
+                scoreCandidate(a, query)
+        );
 
-        const possible = [
-            `${BASE_URL}/manga/${slug}/`,
-            `${BASE_URL}/manga/${slug}`
-        ];
+        const best = unique[0];
 
-        for (const url of possible) {
-            try {
-                const html = await request(url);
+        try {
+            const html = await request(best.url);
 
-                const realTitle = extractTitle(html);
-
-                if (realTitle) {
-                    return {
-                        title: realTitle,
-                        url
-                    };
-                }
-            } catch {
-                // Continue.
-            }
+            return {
+                title:
+                    extractTitle(html) ||
+                    best.title,
+                url: best.url,
+                html
+            };
+        } catch {
+            return best;
         }
-
-        return null;
-    }
-
-    unique.sort(
-        (a, b) =>
-            scoreMangaCandidate(b, query) -
-            scoreMangaCandidate(a, query)
-    );
-
-    const best = unique[0];
-
-    if (scoreMangaCandidate(best, query) <= 0) {
-        return null;
     }
 
     /*
-     * Fetch the actual manga page so the title is reliable.
+     * Direct slug fallback.
      */
-    try {
-        const html = await request(best.url);
+    const slug = slugify(query);
 
-        const realTitle = extractTitle(html);
+    const directUrls = [
+        `${BASE_URL}/manga/${slug}/`,
+        `${BASE_URL}/manga/${slug}`
+    ];
 
-        return {
-            title: realTitle || best.title,
-            url: best.url
-        };
-    } catch {
-        return best;
+    for (const url of directUrls) {
+        try {
+            const html = await request(url);
+
+            const realTitle =
+                extractTitle(html);
+
+            if (realTitle) {
+                return {
+                    title: realTitle,
+                    url,
+                    html
+                };
+            }
+        } catch {
+            // Continue.
+        }
     }
+
+    return null;
 }
 
-async function findChapter(mangaUrl, requestedChapter) {
-    const html = await request(mangaUrl);
+async function findChapter(
+    mangaUrl,
+    requestedChapter,
+    mangaHtml = null
+) {
+    const html =
+        mangaHtml ||
+        await request(mangaUrl);
 
     const links = extractLinks(html);
 
-    const chapterCandidates = [];
+    const candidates = [];
 
     for (const link of links) {
-        const number = extractChapterNumber(link.text);
+        const number =
+            extractChapterNumber(link.text) ||
+            extractChapterNumber(link.url);
 
-        if (number == null) continue;
+        if (number == null) {
+            continue;
+        }
 
         /*
-         * Only consider likely chapter URLs.
+         * Chapter URLs normally contain one of these.
          */
         if (
-            !/\/chapter[-/]/i.test(link.url) &&
-            !/\/manga\//i.test(link.url)
+            !/chapter|capitulo|capitulo/i.test(
+                link.url + " " + link.text
+            )
         ) {
             continue;
         }
 
-        chapterCandidates.push({
+        candidates.push({
             url: link.url,
             text: link.text,
             number
@@ -456,52 +498,37 @@ async function findChapter(mangaUrl, requestedChapter) {
     }
 
     /*
-     * Exact chapter first.
+     * Exact match.
      */
-    let match = chapterCandidates.find(candidate =>
-        chaptersEqual(candidate.number, requestedChapter)
+    const exact = candidates.find(
+        candidate =>
+            chaptersEqual(
+                candidate.number,
+                requestedChapter
+            )
     );
 
-    if (match) {
-        return match;
+    if (exact) {
+        return exact;
     }
 
     /*
-     * Sometimes the chapter link text is poor, but the URL contains
-     * the chapter number.
+     * Direct URL fallback.
      */
-    for (const link of links) {
-        if (
-            !/chapter/i.test(link.url) &&
-            !/capitulo/i.test(link.url) &&
-            !/capitulo/i.test(link.text)
-        ) {
-            continue;
-        }
+    let slug;
 
-        const number =
-            extractChapterNumber(link.text) ||
-            extractChapterNumber(link.url);
-
-        if (chaptersEqual(number, requestedChapter)) {
-            return {
-                url: link.url,
-                text: link.text,
-                number
-            };
-        }
+    try {
+        slug = new URL(mangaUrl)
+            .pathname
+            .split("/")
+            .filter(Boolean)
+            .pop();
+    } catch {
+        slug = slugify(mangaUrl);
     }
 
-    /*
-     * Direct Madara-style fallbacks.
-     */
-    const slug = mangaUrl
-        .replace(/\/+$/, "")
-        .split("/")
-        .filter(Boolean)
-        .pop();
-
-    const chapter = String(requestedChapter).trim();
+    const chapter =
+        String(requestedChapter).trim();
 
     const fallbacks = [
         `${BASE_URL}/manga/${slug}/chapter-${chapter}/`,
@@ -512,11 +539,19 @@ async function findChapter(mangaUrl, requestedChapter) {
 
     for (const url of fallbacks) {
         try {
-            const chapterHtml = await request(url);
+            const chapterHtml =
+                await request(url, {
+                    Referer: mangaUrl
+                });
+
+            const pages =
+                extractReaderImages(chapterHtml);
 
             if (
-                /reading-content/i.test(chapterHtml) ||
-                extractReaderImages(chapterHtml).length > 0
+                pages.length > 0 ||
+                /reading-content|page-break/i.test(
+                    chapterHtml
+                )
             ) {
                 return {
                     url,
@@ -532,44 +567,63 @@ async function findChapter(mangaUrl, requestedChapter) {
     return null;
 }
 
-async function getChapterPages(chapterUrl) {
-    const html = await request(chapterUrl, {
-        Referer: chapterUrl
-    });
+async function getPages(chapterUrl) {
+    const html = await request(
+        chapterUrl,
+        {
+            Referer: chapterUrl
+        }
+    );
 
-    let pages = extractReaderImages(html);
+    let pages =
+        extractReaderImages(html);
 
-    /*
-     * Remove duplicate images while preserving page order.
-     */
     pages = [...new Set(pages)];
 
-    /*
-     * Remove obvious non-page images.
-     */
     pages = pages.filter(url => {
-        return !(
-            /logo|favicon|avatar|banner|advert/i.test(url)
-        );
+        if (
+            /logo|favicon|avatar|banner|advert|icon/i.test(
+                url
+            )
+        ) {
+            return false;
+        }
+
+        return true;
     });
 
     if (pages.length === 0) {
-        throw new Error("No manga pages found on MangaLivre reader.");
+        throw new Error(
+            "No manga pages found on MangaLivre."
+        );
     }
 
     return pages;
 }
 
-async function fetch(title, chapter) {
+/*
+ * IMPORTANT:
+ * Your source manager expects getChapter().
+ */
+async function getChapter(title, chapter) {
     if (!title) {
-        throw new Error("Manga title is required.");
+        throw new Error(
+            "Manga title is required."
+        );
     }
 
-    if (chapter == null || chapter === "") {
-        throw new Error("Chapter number is required.");
+    if (
+        chapter === undefined ||
+        chapter === null ||
+        String(chapter).trim() === ""
+    ) {
+        throw new Error(
+            "Chapter number is required."
+        );
     }
 
-    const manga = await searchManga(title);
+    const manga =
+        await searchManga(title);
 
     if (!manga) {
         throw new Error(
@@ -577,10 +631,12 @@ async function fetch(title, chapter) {
         );
     }
 
-    const chapterInfo = await findChapter(
-        manga.url,
-        chapter
-    );
+    const chapterInfo =
+        await findChapter(
+            manga.url,
+            chapter,
+            manga.html
+        );
 
     if (!chapterInfo) {
         throw new Error(
@@ -588,9 +644,10 @@ async function fetch(title, chapter) {
         );
     }
 
-    const pages = await getChapterPages(
-        chapterInfo.url
-    );
+    const pages =
+        await getPages(
+            chapterInfo.url
+        );
 
     return {
         title: manga.title,
@@ -602,8 +659,5 @@ async function fetch(title, chapter) {
 
 module.exports = {
     name: "MangaLivre",
-
-    async fetch(title, chapter) {
-        return await fetch(title, chapter);
-    }
+    getChapter
 };
