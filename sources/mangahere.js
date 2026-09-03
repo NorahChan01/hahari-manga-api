@@ -2,7 +2,6 @@ const axios = require("axios");
 const cheerio = require("cheerio");
 
 const BASE_URL = "https://www.mangahere.cc";
-const MOBILE_URL = "https://m.mangahere.cc";
 
 const client = axios.create({
     timeout: 30000,
@@ -35,16 +34,8 @@ function absolute(url, base = BASE_URL) {
     }
 }
 
-function chapterNumber(text) {
-    const match = String(text || "").match(
-        /(?:chapter|ch\.?|episode|ep\.?)[\s._-]*(\d+(?:\.\d+)?)/i
-    );
-
-    return match ? match[1] : null;
-}
-
 function sameChapter(a, b) {
-    if (!a) return false;
+    if (a == null) return false;
 
     return (
         String(a).trim() === String(b).trim() ||
@@ -52,172 +43,282 @@ function sameChapter(a, b) {
     );
 }
 
-/*
- * MangaHere uses a packed JavaScript reader.
- * This is a small P.A.C.K.E.R. decoder for the
- * reader script used by MangaHere.
- */
-function unpackPacker(p, a, c, k, e, d) {
-    function base36(num) {
-        return num.toString(36);
-    }
+function extractChapterNumber(text) {
+    const value = String(text || "");
 
-    if (!p || !a || !c || !k) {
-        return "";
-    }
+    const patterns = [
+        /chapter[\s._-]*(\d+(?:\.\d+)?)/i,
+        /\bc[\s._-]*(\d+(?:\.\d+)?)(?:[^\d]|$)/i,
+        /\/c(\d+)(?:\/|\.html|$)/i
+    ];
 
-    try {
-        while (c--) {
-            const key = base36(c);
+    for (const regex of patterns) {
+        const match = value.match(regex);
 
-            const value =
-                k[c] !== undefined && k[c] !== ""
-                    ? k[c]
-                    : key;
-
-            p = p.replace(
-                new RegExp("\\b" + key + "\\b", "g"),
-                value
-            );
+        if (match) {
+            return match[1];
         }
-
-        return p;
-    } catch {
-        return "";
     }
+
+    return null;
 }
 
 /*
- * More complete Dean Edwards P.A.C.K.E.R. decoder.
+ * MangaHere uses the old DM5 reader system.
+ *
+ * The actual reader commonly contains variables such as:
+ *
+ *   page = ...
+ *   pages = ...
+ *   pix = ...
+ *   pvalue = ...
+ *
+ * We deliberately DO NOT accept normal website PNG/JPG
+ * assets such as logo.png, reader-win.png, etc.
  */
-function decodePackedScript(script) {
-    const match = script.match(
-        /eval\(function\(p,a,c,k,e,d\).*?\}\('([\s\S]*?)',(\d+),(\d+),'([\s\S]*?)'\.split\('\|'\)/m
+
+function isReaderImage(url) {
+    if (!url) return false;
+
+    const lower = url.toLowerCase();
+
+    /*
+     * Reject obvious MangaHere UI assets.
+     */
+    const blocked = [
+        "/images/logo",
+        "/images/detail-",
+        "/images/downlist",
+        "/images/top-bar",
+        "/images/emotion",
+        "/images/win-cross",
+        "/images/cross",
+        "/images/reader-win",
+        "/images/header",
+        "/images/footer",
+        "/images/avatar",
+        "/images/icon",
+        "/images/button",
+        "/images/loading",
+        "/images/1.png",
+        "/images/2.png",
+        "/images/3.png",
+        "/images/4.png"
+    ];
+
+    if (blocked.some(x => lower.includes(x))) {
+        return false;
+    }
+
+    /*
+     * Reader images normally come from a different image
+     * path/CDN, not the site's static /images/ directory.
+     */
+    if (
+        lower.includes("static.mangahere.cc") &&
+        lower.includes("/images/")
+    ) {
+        return false;
+    }
+
+    return (
+        /\.(jpg|jpeg|webp)(?:\?|$)/i.test(url) ||
+        /\/manga\//i.test(url) ||
+        /\/chapter/i.test(url) ||
+        /\/comic/i.test(url)
     );
-
-    if (!match) {
-        return script;
-    }
-
-    const payload = match[1];
-    const radix = parseInt(match[2], 10);
-    let count = parseInt(match[3], 10);
-    const keywords = match[4].split("|");
-
-    function encode(num) {
-        let result = "";
-
-        do {
-            result =
-                (num % radix).toString(radix) + result;
-            num = Math.floor(num / radix);
-        } while (num > 0);
-
-        return result;
-    }
-
-    while (count--) {
-        const word =
-            keywords[count] || encode(count);
-
-        if (!word) continue;
-
-        const token = encode(count);
-
-        const regex = new RegExp(
-            "\\b" + token.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "\\b",
-            "g"
-        );
-
-        script = script.replace(regex, word);
-    }
-
-    return payload;
 }
 
-/*
- * Extract MangaHere reader variables.
- *
- * Current MangaHere readers commonly contain:
- *
- * pix=...
- * pvalue=...
- *
- * The official current extractor also relies on
- * these values after unpacking the reader script.
- */
-function extractReaderVariables(html) {
-    const decoded = decodePackedScript(html);
-
-    let pix = null;
-    let pvalue = null;
-
-    const pixMatches = [
-        decoded.match(/pix\s*=\s*["']([^"']+)["']/i),
-        decoded.match(/pix\s*:\s*["']([^"']+)["']/i)
-    ];
-
-    for (const match of pixMatches) {
-        if (match) {
-            pix = match[1];
-            break;
-        }
-    }
-
-    const pvalueMatches = [
-        decoded.match(/pvalue\s*=\s*["']([^"']+)["']/i),
-        decoded.match(/pvalue\s*:\s*["']([^"']+)["']/i)
-    ];
-
-    for (const match of pvalueMatches) {
-        if (match) {
-            pvalue = match[1];
-            break;
-        }
-    }
-
-    return {
-        pix,
-        pvalue,
-        decoded
-    };
-}
-
-function extractDirectImages(html) {
+function extractRealImagesFromHTML(html) {
+    const images = [];
     const $ = cheerio.load(html);
-    const pages = [];
 
-    $("img").each((_, el) => {
-        const src =
-            $(el).attr("data-original") ||
-            $(el).attr("data-src") ||
-            $(el).attr("src");
+    /*
+     * Only inspect reader-specific containers first.
+     */
+    const selectors = [
+        "#chapter-reader img",
+        ".reader-content img",
+        ".reading-content img",
+        ".chapter-content img",
+        ".container-chapter-reader img",
+        ".page-chapter img",
+        ".v-img img"
+    ];
 
-        if (!src) return;
+    for (const selector of selectors) {
+        $(selector).each((_, el) => {
+            const src =
+                $(el).attr("data-original") ||
+                $(el).attr("data-src") ||
+                $(el).attr("data-lazy-src") ||
+                $(el).attr("src");
 
-        const url = absolute(src);
+            if (!src) return;
 
-        if (!url) return;
+            const url = absolute(src);
 
-        if (
-            /\.(jpg|jpeg|png|webp)(?:\?|$)/i.test(url)
-        ) {
-            pages.push(url);
+            if (url && isReaderImage(url)) {
+                images.push(url);
+            }
+        });
+    }
+
+    /*
+     * Search inline JavaScript for actual image URLs.
+     */
+    $("script").each((_, el) => {
+        const script = $(el).html() || "";
+
+        const urlRegex =
+            /https?:\/\/[^"'\\\s]+?\.(?:jpg|jpeg|webp)(?:\?[^"'\\\s]*)?/gi;
+
+        const matches = script.match(urlRegex);
+
+        if (!matches) return;
+
+        for (const match of matches) {
+            const clean = match
+                .replace(/\\u0026/g, "&")
+                .replace(/\\\//g, "/")
+                .replace(/\\x26/g, "&");
+
+            if (isReaderImage(clean)) {
+                images.push(clean);
+            }
         }
     });
 
-    return pages;
+    return unique(images);
+}
+
+function unique(array) {
+    return [...new Set(
+        array
+            .filter(Boolean)
+            .map(x => x.trim())
+    )];
+}
+
+/*
+ * Extract values from JavaScript.
+ */
+function extractVariable(html, names) {
+    for (const name of names) {
+        const patterns = [
+            new RegExp(
+                `(?:var|let|const)\\s+${name}\\s*=\\s*["']([^"']+)["']`,
+                "i"
+            ),
+            new RegExp(
+                `${name}\\s*=\\s*["']([^"']+)["']`,
+                "i"
+            ),
+            new RegExp(
+                `"${name}"\\s*:\\s*["']([^"']+)["']`,
+                "i"
+            ),
+            new RegExp(
+                `'${name}'\\s*:\\s*["']([^"']+)["']`,
+                "i"
+            )
+        ];
+
+        for (const regex of patterns) {
+            const match = html.match(regex);
+
+            if (match) {
+                return match[1];
+            }
+        }
+    }
+
+    return null;
+}
+
+/*
+ * Search for arrays of image URLs.
+ */
+function extractImageArrays(html) {
+    const results = [];
+
+    const patterns = [
+        /(?:pages|pageImages|chapterImages|images|imageList)\s*=\s*\[([\s\S]*?)\]/gi,
+        /(?:pages|pageImages|chapterImages|images|imageList)\s*:\s*\[([\s\S]*?)\]/gi
+    ];
+
+    for (const regex of patterns) {
+        let match;
+
+        while ((match = regex.exec(html)) !== null) {
+            const body = match[1];
+
+            const urls = body.match(
+                /["']([^"']+\.(?:jpg|jpeg|webp)(?:\?[^"']*)?)["']/gi
+            );
+
+            if (!urls) continue;
+
+            for (const item of urls) {
+                const clean = item
+                    .replace(/^["']|["']$/g, "")
+                    .replace(/\\\//g, "/")
+                    .replace(/\\u0026/g, "&");
+
+                const url = absolute(clean);
+
+                if (url && isReaderImage(url)) {
+                    results.push(url);
+                }
+            }
+        }
+    }
+
+    return unique(results);
+}
+
+/*
+ * Search HTML for reader image paths.
+ *
+ * We intentionally require manga-reader-looking paths and
+ * reject the site's static UI image directory.
+ */
+function extractReaderPaths(html) {
+    const results = [];
+
+    const patterns = [
+        /["']([^"']*\/(?:manga|chapter|comic|reader)[^"']*\.(?:jpg|jpeg|webp)(?:\?[^"']*)?)["']/gi,
+        /["']([^"']*\.(?:jpg|jpeg|webp)(?:\?[^"']*)?)["']/gi
+    ];
+
+    for (const regex of patterns) {
+        let match;
+
+        while ((match = regex.exec(html)) !== null) {
+            const raw = match[1]
+                .replace(/\\\//g, "/")
+                .replace(/\\u0026/g, "&");
+
+            const url = absolute(raw);
+
+            if (url && isReaderImage(url)) {
+                results.push(url);
+            }
+        }
+    }
+
+    return unique(results);
 }
 
 async function searchManga(title) {
     const wanted = normalize(title);
 
-    const urls = [
+    const searchUrls = [
         `${BASE_URL}/search?title=${encodeURIComponent(title)}`,
         `${BASE_URL}/search/?title=${encodeURIComponent(title)}`
     ];
 
-    for (const url of urls) {
+    for (const url of searchUrls) {
         try {
             const response = await client.get(url);
 
@@ -227,7 +328,9 @@ async function searchManga(title) {
 
             $("a[href*='/manga/']").each((_, el) => {
                 const href = $(el).attr("href");
-                const text = $(el).attr("title") ||
+
+                const text =
+                    $(el).attr("title") ||
                     $(el).text().trim();
 
                 if (!href || !text) return;
@@ -255,74 +358,43 @@ async function searchManga(title) {
                 });
             });
 
-            const unique = results.filter(
-                (item, index, arr) =>
+            const uniqueResults = results.filter(
+                (item, index, array) =>
                     item.url &&
-                    arr.findIndex(x => x.url === item.url) === index
+                    array.findIndex(
+                        x => x.url === item.url
+                    ) === index
             );
 
-            unique.sort((a, b) => b.score - a.score);
+            uniqueResults.sort(
+                (a, b) => b.score - a.score
+            );
 
-            if (unique.length) {
-                return unique[0];
+            if (uniqueResults.length) {
+                return uniqueResults[0];
             }
         } catch (_) {}
     }
 
-    /*
-     * Fallback: MangaHere search is sometimes easier
-     * to reach from the mobile site.
-     */
-    try {
-        const response = await client.get(
-            `${MOBILE_URL}/search?title=${encodeURIComponent(title)}`
-        );
-
-        const $ = cheerio.load(response.data);
-        const results = [];
-
-        $("a[href*='/manga/']").each((_, el) => {
-            const href = $(el).attr("href");
-            const text = $(el).attr("title") ||
-                $(el).text().trim();
-
-            if (!href || !text) return;
-
-            const name = text.replace(/\s+/g, " ").trim();
-            const normalized = normalize(name);
-
-            let score = 0;
-
-            if (normalized === wanted) score = 100;
-            else if (normalized.includes(wanted)) score = 80;
-            else if (wanted.includes(normalized)) score = 70;
-
-            results.push({
-                title: name,
-                url: absolute(href, MOBILE_URL),
-                score
-            });
-        });
-
-        results.sort((a, b) => b.score - a.score);
-
-        if (results.length) {
-            return results[0];
-        }
-    } catch (_) {}
-
     return null;
 }
 
-async function getChapterUrl(manga, chapter) {
-    const response = await client.get(manga.url);
+async function findChapter(manga, chapter) {
+    const response = await client.get(manga.url, {
+        headers: {
+            Referer: BASE_URL + "/"
+        }
+    });
 
     const $ = cheerio.load(response.data);
 
-    let result = null;
+    let chapterUrl = null;
 
+    /*
+     * MangaHere chapter list.
+     */
     $("#chapterlist li a").each((_, el) => {
-        if (result) return;
+        if (chapterUrl) return;
 
         const href = $(el).attr("href");
         const text = $(el).text().trim();
@@ -330,19 +402,19 @@ async function getChapterUrl(manga, chapter) {
         if (!href) return;
 
         const number =
-            chapterNumber(`${text} ${href}`);
+            extractChapterNumber(`${text} ${href}`);
 
         if (sameChapter(number, chapter)) {
-            result = absolute(href, manga.url);
+            chapterUrl = absolute(href, manga.url);
         }
     });
 
     /*
-     * Current MangaHere uses #chapterlist.
+     * Fallback for different layouts.
      */
-    if (!result) {
+    if (!chapterUrl) {
         $("a[href]").each((_, el) => {
-            if (result) return;
+            if (chapterUrl) return;
 
             const href = $(el).attr("href");
             const text = $(el).text().trim();
@@ -350,24 +422,18 @@ async function getChapterUrl(manga, chapter) {
             if (!href) return;
 
             const number =
-                chapterNumber(`${text} ${href}`);
+                extractChapterNumber(`${text} ${href}`);
 
             if (sameChapter(number, chapter)) {
-                result = absolute(href, manga.url);
+                chapterUrl = absolute(href, manga.url);
             }
         });
     }
 
-    return result;
+    return chapterUrl;
 }
 
-async function getReaderPages(chapterUrl) {
-    /*
-     * MangaHere reader pages are traditionally loaded
-     * one page at a time and use an AJAX endpoint.
-     *
-     * First request the chapter itself.
-     */
+async function extractPages(chapterUrl) {
     const response = await client.get(chapterUrl, {
         headers: {
             Referer: chapterUrl
@@ -377,149 +443,76 @@ async function getReaderPages(chapterUrl) {
     const html = response.data;
 
     /*
-     * Some chapters expose the image directly.
+     * 1. Direct reader images.
      */
-    const direct = extractDirectImages(html);
+    let pages = extractRealImagesFromHTML(html);
 
-    if (direct.length) {
-        return direct;
+    if (pages.length > 1) {
+        return unique(pages);
     }
 
     /*
-     * MangaHere/DM5 reader uses an AJAX request.
+     * 2. JavaScript image arrays.
      */
-    const ajaxHeaders = {
-        "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-            "AppleWebKit/537.36 (KHTML, like Gecko) " +
-            "Chrome/131.0.0.0 Safari/537.36",
-        "Referer": chapterUrl,
-        "Accept": "*/*",
-        "X-Requested-With": "XMLHttpRequest",
-        "Accept-Language": "en-US,en;q=0.9"
-    };
+    const arrayImages = extractImageArrays(html);
 
-    /*
-     * Try the chapter's own URL first.
-     * MangaHere has historically exposed the packed
-     * reader through the mobile reader route.
-     */
-    const candidates = [
-        chapterUrl,
-        chapterUrl.replace(
-            "https://www.mangahere.cc",
-            "https://m.mangahere.cc"
-        )
-    ];
+    if (arrayImages.length > pages.length) {
+        pages = arrayImages;
+    }
 
-    for (const pageUrl of candidates) {
-        try {
-            const page = await client.get(pageUrl, {
-                headers: ajaxHeaders
-            });
-
-            const vars = extractReaderVariables(page.data);
-
-            if (vars.pix && vars.pvalue) {
-                const base =
-                    vars.pix.startsWith("http")
-                        ? vars.pix
-                        : `https:${vars.pix}`;
-
-                const imageUrl = `${base}${vars.pvalue}`;
-
-                return [imageUrl];
-            }
-        } catch (_) {}
+    if (pages.length > 1) {
+        return unique(pages);
     }
 
     /*
-     * Try chapter pages 1..50.
-     *
-     * MangaHere often has:
-     *
-     * /manga/title/c001/1.html
-     * /manga/title/c001/2.html
-     *
-     * Each page can contain one packed image URL.
+     * 3. Reader paths.
      */
-    const baseChapter = chapterUrl.replace(/\/+$/, "");
+    const readerPaths = extractReaderPaths(html);
 
-    const pages = [];
+    if (readerPaths.length > pages.length) {
+        pages = readerPaths;
+    }
 
-    for (let page = 1; page <= 100; page++) {
-        const candidatesForPage = [
-            `${baseChapter}/${page}.html`,
-            `${baseChapter}/${page}`,
-            `${baseChapter}/`
+    if (pages.length > 1) {
+        return unique(pages);
+    }
+
+    /*
+     * 4. Look for reader variables.
+     */
+    const pix = extractVariable(
+        html,
+        ["pix", "imgHost", "imageHost", "imageServer"]
+    );
+
+    const pvalue = extractVariable(
+        html,
+        ["pvalue", "image", "chapterPath", "pagePath"]
+    );
+
+    if (pix && pvalue) {
+        const host = pix.startsWith("http")
+            ? pix
+            : `https:${pix}`;
+
+        const possible = [
+            absolute(pvalue, host),
+            absolute(
+                pvalue.startsWith("/")
+                    ? pvalue
+                    : `/${pvalue}`,
+                host
+            )
         ];
 
-        let found = false;
-
-        for (const pageUrl of candidatesForPage) {
-            try {
-                const pageResponse = await client.get(
-                    pageUrl,
-                    {
-                        headers: ajaxHeaders
-                    }
-                );
-
-                const pageHtml = pageResponse.data;
-
-                const directImages =
-                    extractDirectImages(pageHtml);
-
-                if (directImages.length) {
-                    for (const image of directImages) {
-                        if (!pages.includes(image)) {
-                            pages.push(image);
-                        }
-                    }
-
-                    found = true;
-                    break;
-                }
-
-                const vars =
-                    extractReaderVariables(pageHtml);
-
-                if (vars.pix && vars.pvalue) {
-                    let base =
-                        vars.pix.startsWith("http")
-                            ? vars.pix
-                            : `https:${vars.pix}`;
-
-                    if (!base.endsWith("/")) {
-                        base += "/";
-                    }
-
-                    const image =
-                        absolute(
-                            vars.pvalue,
-                            base
-                        );
-
-                    if (image && !pages.includes(image)) {
-                        pages.push(image);
-                    }
-
-                    found = true;
-                    break;
-                }
-            } catch (_) {}
-        }
-
-        /*
-         * Once we hit a page that does not exist,
-         * stop after the reader has already produced pages.
-         */
-        if (!found && pages.length) {
-            break;
+        for (const url of possible) {
+            if (url && isReaderImage(url)) {
+                pages.push(url);
+            }
         }
     }
 
-    return pages;
+    return unique(pages);
 }
 
 module.exports = {
@@ -541,7 +534,7 @@ module.exports = {
         }
 
         const chapterUrl =
-            await getChapterUrl(manga, chapter);
+            await findChapter(manga, chapter);
 
         if (!chapterUrl) {
             throw new Error(
@@ -550,19 +543,23 @@ module.exports = {
         }
 
         const pages =
-            await getReaderPages(chapterUrl);
+            await extractPages(chapterUrl);
 
-        const cleanPages = pages
-            .map(url => absolute(url))
-            .filter(Boolean)
-            .filter(
-                (url, index, arr) =>
-                    arr.indexOf(url) === index
-            );
+        const cleanPages = unique(
+            pages.filter(isReaderImage)
+        );
 
-        if (!cleanPages.length) {
+        /*
+         * A real chapter should have more than one image.
+         * This prevents false positives such as:
+         *
+         * logo.png
+         * 1.png
+         * 2.png
+         */
+        if (cleanPages.length < 2) {
             throw new Error(
-                `No manga pages found on MangaHere for "${title}" chapter ${chapter}.`
+                `MangaHere reader was found, but no real manga pages could be extracted for "${title}" chapter ${chapter}.`
             );
         }
 
