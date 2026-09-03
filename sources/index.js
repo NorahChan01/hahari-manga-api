@@ -1,5 +1,5 @@
-const MangaK = require("./mangak");
+const WitchToons = require("./witchtoons");
 
 module.exports = [
-    MangaK
+    WitchToons
 ];
