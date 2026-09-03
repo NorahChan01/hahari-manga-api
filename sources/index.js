@@ -1,7 +1,7 @@
 const MangaDex = require("./mangadex");
-const VortexScans = require("./vortexscans");
+const Nyora = require("./nyora");
 
 module.exports = [
     MangaDex,
-    VortexScans
+    Nyora
 ];
