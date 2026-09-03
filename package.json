@@ -1,7 +1,7 @@
 {
   "name": "hahari-manga-api",
   "version": "2.0.0",
-  "description": "Hahari Manga API",
+  "description": "Hahari Manga API with multiple manga sources",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -11,7 +11,6 @@
   },
   "dependencies": {
     "axios": "^1.11.0",
-    "express": "^5.1.0",
-    "nyora-sdk": "^1.0.0"
+    "express": "^5.1.0"
   }
 }
