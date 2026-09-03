@@ -24,23 +24,26 @@ const client = axios.create({
         "Accept-Language":
             "en-US,en;q=0.9",
 
-        "Cache-Control":
-            "no-cache",
-
         "Referer":
             BASE_URL + "/"
     }
 });
 
 
-function normalizeTitle(title) {
-    return String(title || "")
-        .toLowerCase()
-        .normalize("NFD")
-        .replace(/[\u0300-\u036f]/g, "")
-        .replace(/[^a-z0-9\s-]/g, " ")
-        .replace(/\s+/g, " ")
+function cleanUrl(url) {
+    if (!url) return null;
+
+    url = String(url)
+        .replace(/&amp;/gi, "&")
+        .replace(/\\\//g, "/")
+        .replace(/&quot;/gi, '"')
         .trim();
+
+    try {
+        return new URL(url, BASE_URL).href;
+    } catch {
+        return null;
+    }
 }
 
 
@@ -56,42 +59,24 @@ function cleanText(text) {
 }
 
 
-function cleanUrl(url) {
-    if (!url) return null;
-
-    url = String(url)
-        .replace(/&amp;/gi, "&")
-        .replace(/\\\//g, "/")
-        .replace(/&quot;/gi, '"')
+function normalizeTitle(title) {
+    return String(title || "")
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-z0-9\s-]/g, " ")
+        .replace(/\s+/g, " ")
         .trim();
-
-    if (url.startsWith("//")) {
-        url = "https:" + url;
-    }
-
-    try {
-        return new URL(url, BASE_URL).href;
-    } catch {
-        return null;
-    }
 }
 
 
 /*
- * Extract the WeebCentral series ID.
+ * Extract the series ID from:
  *
- * Example:
- *
- * /series/01J76XY7E9FNDZ1DBBM6PBJPFK/One-Piece
- *
- * returns:
- *
- * 01J76XY7E9FNDZ1DBBM6PBJPFK
+ * https://weebcentral.com/series/01J76XY7E9FNDZ1DBBM6PBJPFK/One-Piece
  */
-function extractSeriesId(url) {
-    if (!url) return null;
-
-    const match = String(url).match(
+function getSeriesId(url) {
+    const match = String(url || "").match(
         /\/series\/([^/?#]+)/i
     );
 
@@ -100,16 +85,12 @@ function extractSeriesId(url) {
 
 
 /*
- * Extract chapter ID.
+ * Extract chapter ID from:
  *
- * Example:
- *
- * /chapters/01J76XZ812WKWQH58G74HPTWXX
+ * https://weebcentral.com/chapters/XXXXXXXX
  */
-function extractChapterId(url) {
-    if (!url) return null;
-
-    const match = String(url).match(
+function getChapterId(url) {
+    const match = String(url || "").match(
         /\/chapters\/([^/?#]+)/i
     );
 
@@ -118,208 +99,348 @@ function extractChapterId(url) {
 
 
 /*
- * Parse WeebCentral search results.
+ * Search WeebCentral.
  *
- * Current WeebCentral search uses:
- *
- * /search?text=TITLE
- *
- * Search results contain /series/{ID}/{slug}
+ * IMPORTANT:
+ * Current WeebCentral uses /search/data with these
+ * parameters. This is the format used by current
+ * third-party WeebCentral implementations.
  */
-function extractSeriesLinks(html, title) {
+async function searchSeries(title) {
+
+    const url =
+        `${BASE_URL}/search/data` +
+        `?limit=32` +
+        `&offset=0` +
+        `&text=${encodeURIComponent(title)}` +
+        `&sort=Best+Match` +
+        `&order=Ascending` +
+        `&official=Any` +
+        `&display_mode=Minimal%20Display`;
+
+    const response = await client.get(url, {
+        headers: {
+            "Referer":
+                `${BASE_URL}/search?text=${encodeURIComponent(title)}`
+        }
+    });
+
+    if (response.status !== 200) {
+        throw new Error(
+            `WeebCentral search returned HTTP ${response.status}.`
+        );
+    }
+
+    const html = response.data || "";
+
     const results = [];
 
-    const wanted = normalizeTitle(title);
-
-    const regex =
-        /<a\b[^>]*href\s*=\s*["']([^"']*\/series\/[^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-
-    let match;
-
-    while ((match = regex.exec(html)) !== null) {
-        const href = cleanUrl(match[1]);
-
-        if (!href) continue;
-
-        const text = normalizeTitle(
-            cleanText(match[2])
-        );
-
-        const combined = normalizeTitle(
-            `${href} ${text}`
-        );
-
-        const words = wanted
-            .split(/\s+/)
-            .filter(Boolean);
-
-        let score = 0;
-
-        for (const word of words) {
-            if (combined.includes(word)) {
-                score++;
-            }
-        }
-
-        const percentage =
-            words.length > 0
-                ? score / words.length
-                : 0;
-
-        if (
-            combined.includes(wanted) ||
-            percentage >= 0.6
-        ) {
-            if (!results.includes(href)) {
-                results.push(href);
-            }
-        }
-    }
-
-    return results;
-}
-
-
-/*
- * Extract chapter links from the full chapter list.
- *
- * WeebCentral chapter IDs do NOT contain the chapter
- * number, so we must read the visible chapter text.
- */
-function extractChapterLinks(html, chapter) {
-    const results = [];
-
-    const wanted = String(chapter)
-        .replace(/^chapter\s*/i, "")
-        .trim();
-
     /*
-     * WeebCentral chapter links.
+     * Current search results are article elements.
+     *
+     * The actual manga link is:
+     *
+     * article > a.link.link-hover
      */
-    const regex =
-        /<a\b[^>]*href\s*=\s*["']([^"']*\/chapters\/[^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+    const articleRegex =
+        /<article\b[^>]*>([\s\S]*?)<\/article>/gi;
 
-    let match;
+    let articleMatch;
 
-    while ((match = regex.exec(html)) !== null) {
-        const href = cleanUrl(match[1]);
+    while (
+        (articleMatch = articleRegex.exec(html)) !== null
+    ) {
 
-        if (!href) continue;
+        const article = articleMatch[1];
 
-        const text = cleanText(match[2]);
-
-        /*
-         * Extract the first chapter-like number.
-         *
-         * Examples:
-         * Chapter 1111
-         * Ch. 1111
-         * 1111
-         * Chapter 1111: Title
-         */
-        const numberMatch = text.match(
-            /(?:chapter|ch\.?|#)?\s*(\d+(?:\.\d+)?)/i
-        );
-
-        if (!numberMatch) continue;
-
-        const number = numberMatch[1];
-
-        if (number === wanted) {
-            if (!results.includes(href)) {
-                results.push(href);
-            }
-        }
-    }
-
-    /*
-     * Fallback: inspect surrounding HTML when the
-     * chapter number is not directly inside <a>.
-     */
-    if (results.length === 0) {
-
-        const escapedChapter =
-            wanted.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-        const fallbackRegex =
-            new RegExp(
-                `<a\\b[^>]*href\\s*=\\s*["']([^"']*\\/chapters\\/[^"']+)["'][^>]*>[\\s\\S]{0,1200}?(?:chapter|ch\\.?|#)\\s*${escapedChapter}(?:\\D|$)`,
-                "gi"
+        const linkMatch =
+            article.match(
+                /<a\b[^>]*class\s*=\s*["'][^"']*\blink\b[^"']*\blink-hover\b[^"']*["'][^>]*href\s*=\s*["']([^"']+)["'][^>]*>/i
             );
 
-        while (
-            (match = fallbackRegex.exec(html)) !== null
-        ) {
-            const href = cleanUrl(match[1]);
+        if (!linkMatch) continue;
 
-            if (
-                href &&
-                !results.includes(href)
-            ) {
-                results.push(href);
-            }
-        }
-    }
+        const url = cleanUrl(linkMatch[1]);
 
-    return results;
-}
-
-
-/*
- * Extract images from the dedicated WeebCentral
- * /images?reading_style=long_strip endpoint.
- *
- * This is the important part.
- *
- * Current WeebCentral reader uses:
- *
- * section img[alt^="Page"]
- */
-function extractReaderImages(html) {
-    const images = [];
-
-    /*
-     * Primary selector equivalent:
-     *
-     * section img[alt^="Page"]
-     *
-     * We use regex because this adapter doesn't
-     * depend on cheerio/jsdom.
-     */
-    const imgRegex =
-        /<img\b([^>]*?)>/gi;
-
-    let match;
-
-    while ((match = imgRegex.exec(html)) !== null) {
-
-        const attributes = match[1];
-
-        /*
-         * Only accept actual page images.
-         */
-        const altMatch =
-            attributes.match(
-                /\balt\s*=\s*["']([^"']*)["']/i
-            );
-
-        if (!altMatch) continue;
-
-        const alt =
-            altMatch[1].trim();
-
-        if (!/^Page/i.test(alt)) {
+        if (!url || !/\/series\//i.test(url)) {
             continue;
         }
 
         /*
-         * WeebCentral normally exposes the image
-         * through src.
-         *
-         * Also support lazy attributes just in case.
+         * Try to get the visible title from the article.
          */
+        const text = cleanText(article);
+
+        const wanted = normalizeTitle(title);
+        const normalizedText = normalizeTitle(text);
+
+        const words =
+            wanted
+                .split(/\s+/)
+                .filter(Boolean);
+
+        let score = 0;
+
+        for (const word of words) {
+            if (normalizedText.includes(word)) {
+                score++;
+            }
+        }
+
+        const ratio =
+            words.length
+                ? score / words.length
+                : 0;
+
+        results.push({
+            url,
+            score: ratio,
+            text
+        });
+    }
+
+
+    /*
+     * Fallback parser.
+     *
+     * Some responses may not preserve the exact
+     * article structure.
+     */
+    if (results.length === 0) {
+
+        const linkRegex =
+            /<a\b[^>]*href\s*=\s*["']([^"']*\/series\/[^"']+)["'][^>]*>/gi;
+
+        let match;
+
+        while (
+            (match = linkRegex.exec(html)) !== null
+        ) {
+
+            const url =
+                cleanUrl(match[1]);
+
+            if (!url) continue;
+
+            if (!results.some(x => x.url === url)) {
+                results.push({
+                    url,
+                    score: 0,
+                    text: ""
+                });
+            }
+        }
+    }
+
+
+    /*
+     * Sort best matching title first.
+     */
+    results.sort(
+        (a, b) => b.score - a.score
+    );
+
+    return results;
+}
+
+
+/*
+ * Fetch the complete chapter list.
+ */
+async function fetchChapterList(seriesId) {
+
+    const url =
+        `${BASE_URL}/series/${seriesId}/full-chapter-list`;
+
+    const response =
+        await client.get(url, {
+            headers: {
+                "Referer":
+                    `${BASE_URL}/series/${seriesId}`
+            }
+        });
+
+    if (response.status !== 200) {
+        throw new Error(
+            `WeebCentral chapter list returned HTTP ${response.status}.`
+        );
+    }
+
+    return response.data || "";
+}
+
+
+/*
+ * Parse chapters from the current WeebCentral
+ * full-chapter-list HTML.
+ *
+ * Current structure uses:
+ *
+ * div.flex.items-center
+ *
+ * with:
+ *
+ * a[href*="/chapters/"]
+ *
+ * and the chapter number inside:
+ *
+ * .grow span
+ */
+function parseChapters(html) {
+
+    const chapters = [];
+
+    /*
+     * First try the current container structure.
+     */
+    const containerRegex =
+        /<div\b[^>]*class\s*=\s*["'][^"']*\bflex\b[^"']*\bitems-center\b[^"']*["'][^>]*>([\s\S]*?)<\/div>/gi;
+
+    let containerMatch;
+
+    while (
+        (containerMatch =
+            containerRegex.exec(html)) !== null
+    ) {
+
+        const block =
+            containerMatch[1];
+
+        const linkMatch =
+            block.match(
+                /<a\b[^>]*href\s*=\s*["']([^"']*\/chapters\/[^"']+)["'][^>]*>([\s\S]*?)<\/a>/i
+            );
+
+        if (!linkMatch) continue;
+
+        const url =
+            cleanUrl(linkMatch[1]);
+
+        if (!url) continue;
+
+        const linkContent =
+            linkMatch[2];
+
+        const text =
+            cleanText(linkContent);
+
+        const numberMatch =
+            text.match(
+                /(?:chapter|ch\.?|#)?\s*(\d+(?:\.\d+)?)/i
+            );
+
+        if (!numberMatch) continue;
+
+        const number =
+            parseFloat(numberMatch[1]);
+
+        const id =
+            getChapterId(url);
+
+        if (!id) continue;
+
+        if (
+            !chapters.some(
+                c => c.id === id
+            )
+        ) {
+            chapters.push({
+                id,
+                number,
+                title: text,
+                url
+            });
+        }
+    }
+
+
+    /*
+     * More permissive fallback.
+     */
+    if (chapters.length === 0) {
+
+        const linkRegex =
+            /<a\b[^>]*href\s*=\s*["']([^"']*\/chapters\/[^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+
+        let match;
+
+        while (
+            (match = linkRegex.exec(html)) !== null
+        ) {
+
+            const url =
+                cleanUrl(match[1]);
+
+            if (!url) continue;
+
+            const text =
+                cleanText(match[2]);
+
+            const numberMatch =
+                text.match(
+                    /(?:chapter|ch\.?|#)?\s*(\d+(?:\.\d+)?)/i
+                );
+
+            if (!numberMatch) continue;
+
+            const number =
+                parseFloat(numberMatch[1]);
+
+            const id =
+                getChapterId(url);
+
+            if (!id) continue;
+
+            if (
+                !chapters.some(
+                    c => c.id === id
+                )
+            ) {
+                chapters.push({
+                    id,
+                    number,
+                    title: text,
+                    url
+                });
+            }
+        }
+    }
+
+
+    return chapters;
+}
+
+
+/*
+ * Extract actual reader images.
+ *
+ * Current WeebCentral reader supports:
+ *
+ * /chapters/{id}/images?reading_style=long_strip
+ */
+function extractImages(html) {
+
+    const images = [];
+
+    /*
+     * Preferred:
+     *
+     * section img[alt^="Page"]
+     */
+    const pageRegex =
+        /<img\b([^>]*\balt\s*=\s*["']Page[^"']*["'][^>]*)>/gi;
+
+    let match;
+
+    while (
+        (match = pageRegex.exec(html)) !== null
+    ) {
+
+        const attrs =
+            match[1];
+
         const srcMatch =
-            attributes.match(
+            attrs.match(
                 /\b(?:src|data-src|data-lazy-src|data-original)\s*=\s*["']([^"']+)["']/i
             );
 
@@ -330,9 +451,6 @@ function extractReaderImages(html) {
 
         if (!url) continue;
 
-        /*
-         * Only actual image files.
-         */
         if (
             !/\.(?:jpg|jpeg|png|webp|avif)(?:[?#].*)?$/i
                 .test(url)
@@ -345,21 +463,31 @@ function extractReaderImages(html) {
         }
     }
 
+
     /*
-     * Fallback for image URLs inside HTML if the
-     * normal <img alt="Page ..."> extraction failed.
+     * General fallback.
      */
     if (images.length === 0) {
 
-        const fallbackRegex =
-            /<img\b[^>]*(?:src|data-src|data-lazy-src|data-original)\s*=\s*["']([^"']+)["'][^>]*>/gi;
+        const imgRegex =
+            /<img\b([^>]+)>/gi;
 
         while (
-            (match = fallbackRegex.exec(html)) !== null
+            (match = imgRegex.exec(html)) !== null
         ) {
 
+            const attrs =
+                match[1];
+
+            const srcMatch =
+                attrs.match(
+                    /\b(?:src|data-src|data-lazy-src|data-original)\s*=\s*["']([^"']+)["']/i
+                );
+
+            if (!srcMatch) continue;
+
             const url =
-                cleanUrl(match[1]);
+                cleanUrl(srcMatch[1]);
 
             if (!url) continue;
 
@@ -370,9 +498,6 @@ function extractReaderImages(html) {
                 continue;
             }
 
-            /*
-             * Reject obvious UI assets.
-             */
             const lower =
                 url.toLowerCase();
 
@@ -396,108 +521,7 @@ function extractReaderImages(html) {
 
 
 /*
- * Get the current full chapter list.
- */
-async function getChapterList(seriesId) {
-
-    if (!seriesId) {
-        throw new Error(
-            "WeebCentral series ID is required."
-        );
-    }
-
-    const url =
-        `${BASE_URL}/series/${seriesId}/full-chapter-list`;
-
-    const response =
-        await client.get(url, {
-            headers: {
-                "Accept":
-                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-
-                "Referer":
-                    `${BASE_URL}/series/${seriesId}`
-            }
-        });
-
-    if (response.status !== 200) {
-        throw new Error(
-            `WeebCentral chapter list returned HTTP ${response.status}.`
-        );
-    }
-
-    return response.data;
-}
-
-
-/*
- * Find the series page for a title.
- */
-async function findSeries(title) {
-
-    const searchUrl =
-        `${BASE_URL}/search?text=${encodeURIComponent(title)}`;
-
-    try {
-
-        const response =
-            await client.get(searchUrl);
-
-        if (response.status === 200) {
-
-            const links =
-                extractSeriesLinks(
-                    response.data,
-                    title
-                );
-
-            if (links.length > 0) {
-                return links[0];
-            }
-        }
-
-    } catch {
-        // Continue to fallback.
-    }
-
-    /*
-     * Some installations/search responses can expose
-     * a series link in alternative HTML fragments.
-     */
-    const fallbackUrls = [
-        `${BASE_URL}/search?text=${encodeURIComponent(title)}`
-    ];
-
-    for (const url of fallbackUrls) {
-
-        try {
-
-            const response =
-                await client.get(url);
-
-            const html =
-                response.data || "";
-
-            const direct =
-                html.match(
-                    /https?:\/\/weebcentral\.com\/series\/[^"'\\\s<>]+/i
-                );
-
-            if (direct) {
-                return cleanUrl(direct[0]);
-            }
-
-        } catch {
-            // Continue.
-        }
-    }
-
-    return null;
-}
-
-
-/*
- * Main adapter.
+ * Main source method.
  */
 async function getChapter(title, chapter) {
 
@@ -517,102 +541,129 @@ async function getChapter(title, chapter) {
         );
     }
 
+
     const chapterNumber =
         String(chapter)
             .replace(/^chapter\s*/i, "")
             .trim();
 
-    /*
-     * 1. Find the actual series URL.
-     */
-    const seriesUrl =
-        await findSeries(title);
+    const wantedNumber =
+        parseFloat(chapterNumber);
 
-    if (!seriesUrl) {
+
+    /*
+     * STEP 1
+     * Search WeebCentral using /search/data.
+     */
+    const searchResults =
+        await searchSeries(title);
+
+    if (searchResults.length === 0) {
         throw new Error(
             `Manga "${title}" was not found on WeebCentral.`
         );
     }
 
-    const seriesId =
-        extractSeriesId(seriesUrl);
-
-    if (!seriesId) {
-        throw new Error(
-            `Could not extract WeebCentral series ID from ${seriesUrl}`
-        );
-    }
 
     /*
-     * 2. Fetch the dedicated full chapter list.
+     * Try the best few search results rather than
+     * blindly trusting the first result.
      */
-    const chapterListHtml =
-        await getChapterList(seriesId);
+    const candidates =
+        searchResults.slice(0, 5);
 
-    /*
-     * 3. Find exact requested chapter.
-     */
-    const chapterLinks =
-        extractChapterLinks(
-            chapterListHtml,
-            chapterNumber
-        );
 
-    if (chapterLinks.length === 0) {
-        throw new Error(
-            `Chapter ${chapterNumber} was not found on WeebCentral for "${title}".`
-        );
-    }
+    for (const result of candidates) {
 
-    /*
-     * 4. Try every matching chapter URL.
-     */
-    for (const chapterUrl of chapterLinks) {
+        const seriesId =
+            getSeriesId(result.url);
 
-        const chapterId =
-            extractChapterId(chapterUrl);
+        if (!seriesId) continue;
 
-        if (!chapterId) continue;
-
-        /*
-         * IMPORTANT:
-         *
-         * We do NOT scrape the normal chapter page
-         * for images.
-         *
-         * WeebCentral has a dedicated image endpoint.
-         */
-        const imagesUrl =
-            `${BASE_URL}/chapters/${chapterId}/images?reading_style=long_strip`;
 
         try {
+
+            /*
+             * STEP 2
+             * Get complete chapter list.
+             */
+            const chapterHtml =
+                await fetchChapterList(seriesId);
+
+            const chapters =
+                parseChapters(chapterHtml);
+
+            if (chapters.length === 0) {
+                continue;
+            }
+
+
+            /*
+             * STEP 3
+             * Find exact chapter.
+             */
+            let selected =
+                chapters.find(
+                    c =>
+                        Number(c.number) ===
+                        Number(wantedNumber)
+                );
+
+
+            /*
+             * Handle numbers such as 1.0.
+             */
+            if (!selected) {
+
+                selected =
+                    chapters.find(
+                        c =>
+                            String(c.number) ===
+                            String(wantedNumber)
+                    );
+            }
+
+
+            if (!selected) {
+                continue;
+            }
+
+
+            /*
+             * STEP 4
+             * Fetch dedicated reader image endpoint.
+             */
+            const imagesUrl =
+                `${BASE_URL}/chapters/${selected.id}` +
+                `/images?reading_style=long_strip`;
 
             const response =
                 await client.get(
                     imagesUrl,
                     {
                         headers: {
-                            "Accept":
-                                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-
                             "Referer":
-                                chapterUrl
+                                `${BASE_URL}/chapters/${selected.id}`
                         }
                     }
                 );
+
 
             if (response.status !== 200) {
                 continue;
             }
 
+
+            /*
+             * STEP 5
+             * Extract manga pages.
+             */
             const pages =
-                extractReaderImages(
+                extractImages(
                     response.data
                 );
 
-            /*
-             * Successful chapter.
-             */
+
             if (pages.length > 0) {
 
                 return {
@@ -624,9 +675,12 @@ async function getChapter(title, chapter) {
             }
 
         } catch {
-            // Try next chapter URL.
+            /*
+             * Try the next matching search result.
+             */
         }
     }
+
 
     throw new Error(
         `No manga pages found on WeebCentral for "${title}" chapter ${chapterNumber}.`
