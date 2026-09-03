@@ -1,87 +1,34 @@
 const axios = require("axios");
 
-const API = "https://nhentai.net/api/v2";
+const API_BASE = "https://nhentai.net/api/v2";
 const IMAGE_BASE = "https://i.nhentai.net";
 
 const client = axios.create({
-    timeout: 20000,
+    timeout: 30000,
+    maxRedirects: 5,
     headers: {
         "User-Agent":
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
             "AppleWebKit/537.36 (KHTML, like Gecko) " +
-            "Chrome/128.0.0.0 Safari/537.36",
-        Accept: "application/json"
+            "Chrome/139.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9"
     }
 });
 
-function extension(type) {
-    switch (String(type || "").toLowerCase()) {
-        case "p":
-            return "png";
+function getGalleryId(value) {
+    const text = String(value || "").trim();
 
-        case "j":
-            return "jpg";
-
-        case "g":
-            return "gif";
-
-        case "w":
-            return "webp";
-
-        default:
-            return "jpg";
-    }
-}
-
-function extractGallery(data) {
-    // Normal v2 response
-    if (data?.id) return data;
-
-    // Some wrappers/API proxies wrap the result.
-    if (data?.result?.id) return data.result;
-
-    if (data?.data?.id) return data.data;
-
-    if (data?.gallery?.id) return data.gallery;
-
-    return null;
-}
-
-async function getGallery(id) {
-    const urls = [
-        `${API}/galleries/${id}`,
-        `https://nhentai.net/api/gallery/${id}`
-    ];
-
-    let lastError = null;
-
-    for (const url of urls) {
-        try {
-            const response = await client.get(url);
-
-            const gallery = extractGallery(response.data);
-
-            if (gallery?.id) {
-                return gallery;
-            }
-
-            lastError = new Error(
-                "nHentai returned an invalid gallery response."
-            );
-        } catch (error) {
-            lastError = error;
-        }
-    }
-
-    throw lastError || new Error("Gallery not found.");
-}
-
-function getId(input) {
-    const text = String(input || "").trim();
-
-    const urlMatch = text.match(
-        /nhentai\.net\/g\/(\d+)/i
-    );
+    /*
+     * Accept:
+     *
+     * 263492
+     * https://nhentai.net/g/263492/
+     */
+    const urlMatch =
+        text.match(
+            /nhentai\.net\/g\/(\d+)/i
+        );
 
     if (urlMatch) {
         return urlMatch[1];
@@ -94,131 +41,236 @@ function getId(input) {
     return null;
 }
 
-async function search(query) {
-    const response = await client.get(`${API}/search`, {
-        params: {
-            query,
-            page: 1,
-            sort: "popular"
+function absoluteImage(path) {
+    if (!path) return null;
+
+    const value =
+        String(path).trim();
+
+    if (!value) return null;
+
+    if (/^https?:\/\//i.test(value)) {
+        return value;
+    }
+
+    return `${IMAGE_BASE}/${value.replace(/^\/+/, "")}`;
+}
+
+async function getGallery(id) {
+    const url =
+        `${API_BASE}/galleries/${encodeURIComponent(id)}`;
+
+    try {
+        const response =
+            await client.get(url);
+
+        if (
+            !response.data ||
+            !response.data.id
+        ) {
+            throw new Error(
+                "nHentai returned an invalid gallery."
+            );
         }
-    });
 
-    const results = response.data?.results;
+        return response.data;
 
-    if (!Array.isArray(results) || !results.length) {
+    } catch (error) {
+
+        if (error.response) {
+
+            throw new Error(
+                `nHentai API returned HTTP ${error.response.status}.`
+            );
+        }
+
         throw new Error(
-            `No nHentai results found for "${query}".`
+            `Failed to contact nHentai API: ${error.message}`
         );
+    }
+}
+
+async function searchGallery(query) {
+
+    const response =
+        await client.get(
+            `${API_BASE}/search`,
+            {
+                params: {
+                    query,
+                    page: 1,
+                    sort: "popular"
+                }
+            }
+        );
+
+    const results =
+        response.data?.results;
+
+    if (
+        !Array.isArray(results) ||
+        !results.length
+    ) {
+        return null;
     }
 
     return results[0];
 }
 
-function getPageTypes(gallery) {
-    /*
-     * Official/current v2 structure:
-     *
-     * gallery.images.pages[]
-     *
-     * Each page contains:
-     *
-     * t = "j" -> JPG
-     * t = "p" -> PNG
-     * t = "g" -> GIF
-     */
+module.exports = {
 
-    const pages = gallery?.images?.pages;
+    name: "nHentai",
 
-    if (Array.isArray(pages) && pages.length) {
-        return pages.map(page => extension(page?.t));
-    }
+    async getChapter(
+        title,
+        chapter
+    ) {
 
-    /*
-     * Fallback for unusual API wrappers.
-     *
-     * If the page metadata isn't exposed but the gallery
-     * itself reports a page count, default to JPG.
-     *
-     * This keeps the adapter from falsely declaring that
-     * the gallery has no pages.
-     */
-    const count = Number(gallery?.num_pages || 0);
+        const titleText =
+            String(title || "").trim();
 
-    if (count > 0) {
-        return Array(count).fill("jpg");
-    }
+        const chapterText =
+            String(chapter || "").trim();
 
-    return [];
-}
-
-async function getChapter(title, chapter) {
-    const titleInput = String(title || "").trim();
-    const chapterInput = String(chapter || "").trim();
-
-    if (!titleInput) {
-        throw new Error("nHentai gallery ID or title is required.");
-    }
-
-    /*
-     * Preferred usage:
-     *
-     * -manga 263492
-     *
-     * The number is treated as the nHentai gallery ID.
-     */
-    let galleryId =
-        getId(titleInput) ||
-        (/^\d+$/.test(chapterInput)
-            ? chapterInput
-            : null);
-
-    let gallery;
-
-    if (galleryId) {
-        gallery = await getGallery(galleryId);
-    } else {
-        const result = await search(titleInput);
-
-        if (!result?.id) {
-            throw new Error("Search result has no gallery ID.");
+        if (!titleText) {
+            throw new Error(
+                "Gallery ID or title is required."
+            );
         }
 
-        galleryId = String(result.id);
-        gallery = await getGallery(galleryId);
+        /*
+         * Preferred:
+         *
+         * -manga 263492
+         *
+         * Also supports:
+         *
+         * -manga https://nhentai.net/g/263492/
+         */
+        let galleryId =
+            getGalleryId(titleText);
+
+        /*
+         * If the ID was passed as chapter:
+         *
+         * /api/manga?title=263492&chapter=1
+         */
+        if (
+            !galleryId &&
+            /^\d+$/.test(chapterText)
+        ) {
+            galleryId =
+                chapterText;
+        }
+
+        let gallery;
+
+        /*
+         * Direct gallery lookup.
+         */
+        if (galleryId) {
+
+            gallery =
+                await getGallery(
+                    galleryId
+                );
+
+        } else {
+
+            /*
+             * Title search fallback.
+             */
+            const result =
+                await searchGallery(
+                    titleText
+                );
+
+            if (!result?.id) {
+                throw new Error(
+                    `No nHentai gallery found for "${titleText}".`
+                );
+            }
+
+            galleryId =
+                String(result.id);
+
+            gallery =
+                await getGallery(
+                    galleryId
+                );
+        }
+
+        /*
+         * The v2 API provides:
+         *
+         * gallery.media_id
+         * gallery.pages[]
+         *
+         * Each page already contains the exact
+         * image path, e.g.
+         *
+         * galleries/1367250/1.png
+         *
+         * Do NOT guess jpg/png anymore.
+         */
+        const apiPages =
+            Array.isArray(
+                gallery.pages
+            )
+                ? gallery.pages
+                : [];
+
+        if (!apiPages.length) {
+
+            throw new Error(
+                `Gallery ${gallery.id} contains no page data.`
+            );
+        }
+
+        const pages =
+            apiPages
+                .map(page => {
+
+                    /*
+                     * Current v2 format:
+                     *
+                     * {
+                     *   number: 1,
+                     *   path: "galleries/1367250/1.png",
+                     *   width: 1280,
+                     *   height: 1803
+                     * }
+                     */
+                    return absoluteImage(
+                        page?.path
+                    );
+                })
+                .filter(Boolean);
+
+        if (!pages.length) {
+
+            throw new Error(
+                `Gallery ${gallery.id} returned page metadata but no usable image paths.`
+            );
+        }
+
+        return {
+
+            title:
+                gallery.title?.english ||
+                gallery.title?.pretty ||
+                gallery.title?.japanese ||
+                `nHentai Gallery ${gallery.id}`,
+
+            chapter:
+                String(
+                    gallery.id
+                ),
+
+            source:
+                "nHentai",
+
+            pages
+        };
     }
-
-    const mediaId = gallery.media_id;
-
-    if (!mediaId) {
-        throw new Error("Gallery has no media_id.");
-    }
-
-    const pageTypes = getPageTypes(gallery);
-
-    if (!pageTypes.length) {
-        throw new Error("Gallery contains no pages.");
-    }
-
-    const pages = pageTypes.map((ext, index) => {
-        return `${IMAGE_BASE}/galleries/${mediaId}/${index + 1}.${ext}`;
-    });
-
-    return {
-        title:
-            gallery.title?.english ||
-            gallery.title?.pretty ||
-            gallery.title?.japanese ||
-            `nHentai Gallery ${gallery.id}`,
-
-        chapter: String(gallery.id),
-
-        source: "nHentai",
-
-        pages
-    };
-}
-
-module.exports = {
-    name: "nHentai",
-    getChapter
 };
