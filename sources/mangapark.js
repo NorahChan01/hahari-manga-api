@@ -1,12 +1,8 @@
 const axios = require("axios");
 const https = require("https");
 
-const BASE_URL = "https://mangapark.io";
+const BASE_URL = "https://mangapark1.com";
 
-/*
- * MangaPark's certificate chain can sometimes fail on Render.
- * Keep the TLS workaround isolated to MangaPark only.
- */
 const httpsAgent = new https.Agent({
     rejectUnauthorized: false
 });
@@ -22,7 +18,11 @@ const HEADERS = {
         "image/avif,image/webp,image/apng,*/*;q=0.8",
 
     "Accept-Language": "en-US,en;q=0.9",
+
+    "Referer": BASE_URL + "/",
+
     "Cache-Control": "no-cache",
+
     "Pragma": "no-cache"
 };
 
@@ -51,6 +51,7 @@ function absoluteUrl(url) {
 
     url = String(url)
         .replace(/&amp;/gi, "&")
+        .replace(/\\\//g, "/")
         .trim();
 
     if (url.startsWith("//")) {
@@ -69,10 +70,10 @@ function absoluteUrl(url) {
 }
 
 function extractLinks(html) {
-    const links = [];
+    const results = [];
 
     const regex =
-        /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+        /<a\b[^>]*href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi;
 
     let match;
 
@@ -82,13 +83,35 @@ function extractLinks(html) {
 
         if (!href) continue;
 
-        links.push({
+        results.push({
             href,
             text
         });
     }
 
-    return links;
+    return results;
+}
+
+function extractTitleFromUrl(url) {
+    try {
+        const parsed = new URL(url);
+
+        const parts = parsed.pathname
+            .split("/")
+            .filter(Boolean);
+
+        if (!parts.length) return "";
+
+        return decodeURIComponent(
+            parts[parts.length - 1]
+        )
+            .replace(/[-_]+/g, " ")
+            .replace(/\b(?:chapter|chap|ch)\b.*$/i, "")
+            .replace(/\b\d+(?:\.\d+)?\b.*$/i, "")
+            .trim();
+    } catch {
+        return "";
+    }
 }
 
 function chapterNumberFromText(value) {
@@ -124,8 +147,8 @@ function numberEquals(a, b) {
     return String(a).trim() === String(b).trim();
 }
 
-function extractImageUrls(html) {
-    const results = [];
+function extractImages(html) {
+    const images = [];
     const seen = new Set();
 
     function add(url) {
@@ -135,20 +158,14 @@ function extractImageUrls(html) {
 
         if (!url) return;
 
-        /*
-         * Ignore obvious non-page images.
-         */
         if (
-            /favicon|logo|avatar|icon|sprite|banner|advertisement/i.test(
+            /favicon|logo|avatar|icon|sprite|banner|ads?|advert/i.test(
                 url
             )
         ) {
             return;
         }
 
-        /*
-         * MangaPark may use image URLs with query strings.
-         */
         if (
             !/\.(?:jpg|jpeg|png|webp|gif)(?:[?#]|$)/i.test(
                 url
@@ -160,69 +177,59 @@ function extractImageUrls(html) {
         if (seen.has(url)) return;
 
         seen.add(url);
-        results.push(url);
+        images.push(url);
     }
+
+    let match;
 
     /*
      * Normal image attributes.
      */
-    const srcRegex =
-        /\b(?:src|data-src|data-original|data-lazy-src|data-image)=["']([^"']+)["']/gi;
+    const imageRegex =
+        /<(?:img|source)\b[^>]*?(?:src|data-src|data-original|data-lazy-src|data-image|data-url)\s*=\s*["']([^"']+)["']/gi;
 
-    let match;
-
-    while ((match = srcRegex.exec(html))) {
+    while ((match = imageRegex.exec(html))) {
         add(match[1]);
     }
 
     /*
-     * srcset images.
+     * srcset.
      */
     const srcsetRegex =
-        /\bsrcset=["']([^"']+)["']/gi;
+        /\bsrcset\s*=\s*["']([^"']+)["']/gi;
 
     while ((match = srcsetRegex.exec(html))) {
-        const parts = match[1]
-            .split(",")
-            .map(x => x.trim());
-
-        for (const part of parts) {
-            const url = part.split(/\s+/)[0];
-
-            add(url);
+        for (const part of match[1].split(",")) {
+            add(part.trim().split(/\s+/)[0]);
         }
     }
 
     /*
-     * JSON-escaped image URLs.
+     * Direct image URLs embedded in scripts/JSON.
      */
-    const escapedImageRegex =
+    const directUrlRegex =
         /https?:\\?\/\\?\/[^"'\\\s]+?\.(?:jpg|jpeg|png|webp|gif)(?:\?[^"'\\\s]*)?/gi;
 
-    while ((match = escapedImageRegex.exec(html))) {
-        add(
-            match[0]
-                .replace(/\\\//g, "/")
-                .replace(/\\"/g, '"')
-        );
+    while ((match = directUrlRegex.exec(html))) {
+        add(match[0]);
     }
 
-    return results;
+    return images;
 }
 
 async function request(url) {
     try {
         const response = await axios.get(url, {
-            headers: HEADERS,
+            headers: {
+                ...HEADERS,
+                Referer: BASE_URL + "/"
+            },
 
-            /*
-             * MangaPark certificate workaround.
-             */
             httpsAgent,
 
             timeout: 30000,
 
-            maxRedirects: 8,
+            maxRedirects: 10,
 
             validateStatus: status =>
                 status >= 200 && status < 400
@@ -232,16 +239,12 @@ async function request(url) {
     } catch (error) {
         if (error.response) {
             throw new Error(
-                `HTTP ${error.response.status} from MangaPark`
+                `HTTP ${error.response.status}`
             );
         }
 
-        if (error.code === "ECONNABORTED") {
-            throw new Error("MangaPark request timed out.");
-        }
-
         throw new Error(
-            error.message || "MangaPark request failed."
+            error.message || "Request failed"
         );
     }
 }
@@ -249,22 +252,51 @@ async function request(url) {
 async function searchManga(title) {
     const query = String(title || "").trim();
 
-    if (!query) {
-        return null;
-    }
+    if (!query) return null;
 
     /*
-     * MangaPark search.
+     * Current MangaPark search format.
      */
-    const searchUrl =
-        `${BASE_URL}/search?keyword=${encodeURIComponent(query)}`;
+    const searchUrls = [
+        `${BASE_URL}/search?q=${encodeURIComponent(query)}&page=1`,
+        `${BASE_URL}/search?keyword=${encodeURIComponent(query)}`,
+        `${BASE_URL}/search/${encodeURIComponent(query)}`
+    ];
 
-    const html = await request(searchUrl);
+    let html = "";
+
+    let lastError = null;
+
+    for (const url of searchUrls) {
+        try {
+            html = await request(url);
+
+            if (html && typeof html === "string") {
+                if (
+                    /one piece/i.test(html) ||
+                    /\/manga\//i.test(html) ||
+                    /\/title\//i.test(html) ||
+                    /search/i.test(html)
+                ) {
+                    break;
+                }
+            }
+        } catch (error) {
+            lastError = error;
+        }
+    }
+
+    if (!html) {
+        throw lastError ||
+            new Error("MangaPark search failed.");
+    }
 
     const links = extractLinks(html);
 
     const mangaLinks = links.filter(item => {
-        return /\/title\//i.test(item.href);
+        return (
+            /\/(?:manga|title)\//i.test(item.href)
+        );
     });
 
     if (!mangaLinks.length) {
@@ -277,71 +309,79 @@ async function searchManga(title) {
     let bestScore = -1;
 
     for (const item of mangaLinks) {
-        const textTitle = normalizeTitle(item.text);
+        const visibleTitle =
+            normalizeTitle(item.text);
 
-        let hrefTitle = "";
-
-        try {
-            const pathname =
-                new URL(item.href).pathname;
-
-            hrefTitle = normalizeTitle(
-                pathname
-                    .split("/")
-                    .filter(Boolean)
-                    .pop() || ""
+        const urlTitle =
+            normalizeTitle(
+                extractTitleFromUrl(item.href)
             );
-        } catch {
-            hrefTitle = "";
-        }
 
         let score = 0;
 
-        if (textTitle === wanted) {
+        if (visibleTitle === wanted) {
+            score += 200;
+        }
+
+        if (urlTitle === wanted) {
+            score += 180;
+        }
+
+        if (
+            visibleTitle.includes(wanted) ||
+            wanted.includes(visibleTitle)
+        ) {
             score += 100;
         }
 
-        if (hrefTitle === wanted) {
+        if (
+            urlTitle.includes(wanted) ||
+            wanted.includes(urlTitle)
+        ) {
             score += 90;
         }
 
+        /*
+         * Prefer links whose text actually resembles
+         * the requested manga.
+         */
         if (
-            textTitle.includes(wanted) ||
-            wanted.includes(textTitle)
+            visibleTitle.includes("one piece") &&
+            wanted.includes("one piece")
         ) {
             score += 50;
-        }
-
-        if (
-            hrefTitle.includes(wanted) ||
-            wanted.includes(hrefTitle)
-        ) {
-            score += 40;
-        }
-
-        /*
-         * Prefer actual title pages over generic pages.
-         */
-        if (/\/title\/[^/?#]+/i.test(item.href)) {
-            score += 10;
         }
 
         if (score > bestScore) {
             bestScore = score;
 
             best = {
-                title: item.text || query,
+                title:
+                    item.text ||
+                    extractTitleFromUrl(item.href) ||
+                    query,
+
                 url: item.href
             };
         }
+    }
+
+    /*
+     * Don't return a completely unrelated manga.
+     */
+    if (!best || bestScore < 40) {
+        return null;
     }
 
     return best;
 }
 
 async function getChapter(title, chapter) {
-    const wantedTitle = String(title || "").trim();
-    const wantedChapter = String(chapter || "").trim();
+    const wantedTitle =
+        String(title || "").trim();
+
+    const wantedChapter =
+        String(chapter || "").trim();
 
     if (!wantedTitle) {
         throw new Error("Manga title is required.");
@@ -352,9 +392,10 @@ async function getChapter(title, chapter) {
     }
 
     /*
-     * Find manga.
+     * Search manga.
      */
-    const manga = await searchManga(wantedTitle);
+    const manga =
+        await searchManga(wantedTitle);
 
     if (!manga) {
         throw new Error(
@@ -365,57 +406,19 @@ async function getChapter(title, chapter) {
     /*
      * Open manga page.
      */
-    const mangaHtml = await request(manga.url);
+    const mangaHtml =
+        await request(manga.url);
 
-    const links = extractLinks(mangaHtml);
-
-    /*
-     * Find matching chapter links.
-     */
-    const chapterLinks = links.filter(item => {
-        const combined =
-            `${item.href} ${item.text}`;
-
-        /*
-         * MangaPark chapter URL patterns.
-         */
-        if (
-            !/\/title\/.*?(?:chapter|ch)[-_]/i.test(
-                item.href
-            )
-        ) {
-            return false;
-        }
-
-        const number =
-            chapterNumberFromText(combined);
-
-        if (!number) {
-            return false;
-        }
-
-        return numberEquals(
-            number,
-            wantedChapter
-        );
-    });
+    const links =
+        extractLinks(mangaHtml);
 
     /*
-     * If the normal chapter pattern did not work,
-     * perform a broader scan.
+     * Find chapter links.
      */
-    let candidates = chapterLinks;
-
-    if (!candidates.length) {
-        candidates = links.filter(item => {
+    let chapterLinks =
+        links.filter(item => {
             const combined =
                 `${item.href} ${item.text}`;
-
-            if (
-                !/chapter|chap|ch/i.test(combined)
-            ) {
-                return false;
-            }
 
             const number =
                 chapterNumberFromText(combined);
@@ -428,21 +431,52 @@ async function getChapter(title, chapter) {
                 )
             );
         });
+
+    /*
+     * Some MangaPark pages may have chapter
+     * information in URL patterns that don't
+     * contain the literal word "chapter".
+     */
+    if (!chapterLinks.length) {
+        chapterLinks =
+            links.filter(item => {
+                const combined =
+                    `${item.href} ${item.text}`;
+
+                if (
+                    !/\/(?:chapter|chap|ch)[\/_-]/i.test(
+                        item.href
+                    )
+                ) {
+                    return false;
+                }
+
+                const number =
+                    chapterNumberFromText(combined);
+
+                return (
+                    number &&
+                    numberEquals(
+                        number,
+                        wantedChapter
+                    )
+                );
+            });
     }
 
-    if (!candidates.length) {
+    if (!chapterLinks.length) {
         throw new Error(
             `Chapter ${wantedChapter} not found on MangaPark.`
         );
     }
 
     /*
-     * Remove duplicate chapter URLs.
+     * Remove duplicates.
      */
     const unique = [];
     const seen = new Set();
 
-    for (const item of candidates) {
+    for (const item of chapterLinks) {
         if (seen.has(item.href)) {
             continue;
         }
@@ -452,44 +486,35 @@ async function getChapter(title, chapter) {
     }
 
     /*
-     * Open chapter page.
+     * Use first matching chapter.
      */
-    const chapterPage = unique[0];
+    const chapterUrl =
+        unique[0].href;
 
     const chapterHtml =
-        await request(chapterPage.href);
+        await request(chapterUrl);
 
-    /*
-     * Extract manga pages.
-     */
     let pages =
-        extractImageUrls(chapterHtml);
+        extractImages(chapterHtml);
 
     pages = [...new Set(pages)];
 
-    /*
-     * Remove very small obvious site images.
-     */
-    pages = pages.filter(url => {
-        return !/logo|favicon|avatar|icon|sprite/i.test(
-            url
-        );
-    });
-
     if (!pages.length) {
         throw new Error(
-            "MangaPark chapter page contained no readable images."
+            "MangaPark chapter contained no readable images."
         );
     }
 
     return {
         title:
-            cleanText(manga.title) ||
+            manga.title ||
             wantedTitle,
 
-        chapter: wantedChapter,
+        chapter:
+            wantedChapter,
 
-        source: "MangaPark",
+        source:
+            "MangaPark",
 
         pages
     };
