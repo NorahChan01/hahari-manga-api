@@ -2,131 +2,281 @@ const axios = require("axios");
 
 const API = "https://api.mangadex.org";
 
+const client = axios.create({
+    timeout: 30000,
+    headers: {
+        "User-Agent": "HahariBot/1.0",
+        "Accept": "application/json"
+    }
+});
+
+function showError(error) {
+    if (error.response) {
+        return `HTTP ${error.response.status}: ${
+            typeof error.response.data === "string"
+                ? error.response.data.slice(0, 300)
+                : JSON.stringify(error.response.data).slice(0, 500)
+        }`;
+    }
+
+    return error.message;
+}
+
 module.exports = {
     name: "MangaDex",
 
     async getChapter(mangaName, chapterNumber) {
 
-        // =====================================================
+        // ============================================
         // 1. SEARCH MANGA
-        // =====================================================
+        // ============================================
 
-        const search = await axios.get(`${API}/manga`, {
-            params: {
-                title: mangaName,
-                limit: 10,
-                "contentRating[]": [
-                    "safe",
-                    "suggestive",
-                    "erotica"
-                ],
-                "includes[]": "cover_art"
-            },
-            timeout: 20000,
-            headers: {
-                "User-Agent": "HahariBot/1.0"
-            }
-        });
+        let search;
 
-        const mangas = search.data?.data || [];
+        try {
 
-        if (!mangas.length) {
+            search = await client.get(
+                `${API}/manga`,
+                {
+                    params: {
+                        title: mangaName,
+                        limit: 10,
+                        "contentRating[]": [
+                            "safe",
+                            "suggestive",
+                            "erotica"
+                        ]
+                    }
+                }
+            );
+
+        } catch (error) {
+
             throw new Error(
-                `No manga found for "${mangaName}".`
+                `MangaDex manga search failed: ${showError(error)}`
             );
         }
 
-        // =====================================================
-        // 2. TITLE MATCH
-        // =====================================================
+        const mangas =
+            search.data?.data || [];
 
-        const normalizedQuery =
-            mangaName.toLowerCase().trim();
+        if (!mangas.length) {
 
-        let manga = mangas.find(m => {
-
-            const attrs = m.attributes || {};
-
-            const titles =
-                Object.values(attrs.title || {})
-                    .join(" ")
-                    .toLowerCase()
-                    .trim();
-
-            return titles === normalizedQuery;
-        });
-
-        if (!manga) {
-            manga = mangas[0];
+            throw new Error(
+                `MangaDex found no manga for "${mangaName}".`
+            );
         }
 
-        const mangaID = manga.id;
+        // ============================================
+        // 2. SHOW SEARCH RESULTS
+        // ============================================
 
-        const attributes =
-            manga.attributes || {};
+        console.log(
+            `[MangaDex] Search "${mangaName}" returned ${mangas.length} results`
+        );
+
+        mangas.forEach((manga, index) => {
+
+            const titles =
+                Object.values(
+                    manga.attributes?.title || {}
+                );
+
+            console.log(
+                `[MangaDex] #${index + 1}: ${titles.join(" | ")}`
+            );
+        });
+
+        // ============================================
+        // 3. FIND BEST TITLE
+        // ============================================
+
+        const query =
+            mangaName
+                .toLowerCase()
+                .trim();
+
+        function normalize(text) {
+
+            return String(text || "")
+                .toLowerCase()
+                .replace(/[’'`]/g, "")
+                .replace(/[^a-z0-9]+/g, " ")
+                .replace(/\s+/g, " ")
+                .trim();
+        }
+
+        const normalizedQuery =
+            normalize(query);
+
+        let bestManga = null;
+        let bestScore = -1;
+
+        for (const manga of mangas) {
+
+            const titleObject =
+                manga.attributes?.title || {};
+
+            const altTitles =
+                manga.attributes?.altTitles || [];
+
+            const titleValues = [
+                ...Object.values(titleObject),
+                ...altTitles.flatMap(
+                    obj => Object.values(obj || {})
+                )
+            ];
+
+            let score = 0;
+
+            for (const value of titleValues) {
+
+                const normalized =
+                    normalize(value);
+
+                if (!normalized) continue;
+
+                if (
+                    normalized ===
+                    normalizedQuery
+                ) {
+                    score = Math.max(
+                        score,
+                        1000
+                    );
+                }
+
+                else if (
+                    normalized.includes(
+                        normalizedQuery
+                    )
+                ) {
+                    score = Math.max(
+                        score,
+                        800
+                    );
+                }
+
+                else if (
+                    normalizedQuery.includes(
+                        normalized
+                    )
+                ) {
+                    score = Math.max(
+                        score,
+                        700
+                    );
+                }
+
+                const queryWords =
+                    normalizedQuery.split(" ");
+
+                const titleWords =
+                    normalized.split(" ");
+
+                const common =
+                    queryWords.filter(
+                        word =>
+                            word.length >= 3 &&
+                            titleWords.includes(word)
+                    ).length;
+
+                if (common) {
+
+                    score = Math.max(
+                        score,
+                        common * 100
+                    );
+                }
+            }
+
+            if (score > bestScore) {
+
+                bestScore = score;
+                bestManga = manga;
+            }
+        }
+
+        if (!bestManga) {
+
+            throw new Error(
+                `MangaDex could not select a manga for "${mangaName}".`
+            );
+        }
+
+        const mangaID =
+            bestManga.id;
 
         const titleObject =
-            attributes.title || {};
+            bestManga.attributes?.title || {};
 
         const title =
             titleObject.en ||
             Object.values(titleObject)[0] ||
             mangaName;
 
-        // =====================================================
-        // 3. FIND CHAPTER
-        // =====================================================
+        console.log(
+            `[MangaDex] Selected: ${title} (${mangaID}) score=${bestScore}`
+        );
 
-        const chapters = [];
+        // ============================================
+        // 4. FIND CHAPTERS
+        // ============================================
 
+        let chapters = [];
         let offset = 0;
 
         while (true) {
 
-            const chapterResponse =
-                await axios.get(
-                    `${API}/chapter`,
-                    {
-                        params: {
-                            manga: mangaID,
+            let response;
 
-                            translatedLanguage: ["en"],
+            try {
 
-                            "contentRating[]": [
-                                "safe",
-                                "suggestive",
-                                "erotica"
-                            ],
+                response =
+                    await client.get(
+                        `${API}/chapter`,
+                        {
+                            params: {
+                                manga: mangaID,
 
-                            limit: 100,
-                            offset,
+                                translatedLanguage: [
+                                    "en"
+                                ],
 
-                            order: {
-                                chapter: "asc"
+                                "contentRating[]": [
+                                    "safe",
+                                    "suggestive",
+                                    "erotica"
+                                ],
+
+                                limit: 100,
+                                offset,
+
+                                "order[chapter]":
+                                    "asc"
                             }
-                        },
-
-                        timeout: 20000,
-
-                        headers: {
-                            "User-Agent":
-                                "HahariBot/1.0"
                         }
-                    }
+                    );
+
+            } catch (error) {
+
+                throw new Error(
+                    `MangaDex chapter request failed: ${showError(error)}`
                 );
+            }
 
             const data =
-                chapterResponse.data?.data || [];
+                response.data?.data || [];
 
             chapters.push(...data);
 
             const total =
-                chapterResponse.data?.total ||
+                response.data?.total ||
                 chapters.length;
 
             if (
-                chapters.length >= total ||
-                data.length === 0
+                data.length === 0 ||
+                chapters.length >= total
             ) {
                 break;
             }
@@ -138,106 +288,143 @@ module.exports = {
             }
         }
 
-        // =====================================================
-        // 4. EXACT CHAPTER MATCH
-        // =====================================================
+        console.log(
+            `[MangaDex] Found ${chapters.length} chapters`
+        );
 
-        let chapter = chapters.find(c => {
+        // ============================================
+        // 5. FIND REQUESTED CHAPTER
+        // ============================================
 
-            const value =
-                c.attributes?.chapter;
+        const wanted =
+            String(chapterNumber).trim();
 
-            return value === String(chapterNumber);
-        });
-
-        // Numeric fallback
+        let chapter =
+            chapters.find(
+                c =>
+                    String(
+                        c.attributes?.chapter || ""
+                    ).trim() === wanted
+            );
 
         if (!chapter) {
 
-            chapter = chapters.find(c => {
+            const wantedNumber =
+                Number(wanted);
 
-                const value =
-                    c.attributes?.chapter;
+            if (
+                Number.isFinite(
+                    wantedNumber
+                )
+            ) {
 
-                if (!value) {
-                    return false;
-                }
+                chapter =
+                    chapters.find(c => {
 
-                return (
-                    Number(value) ===
-                    Number(chapterNumber)
-                );
-            });
+                        const value =
+                            c.attributes?.chapter;
+
+                        if (!value) {
+                            return false;
+                        }
+
+                        return (
+                            Number(value) ===
+                            wantedNumber
+                        );
+                    });
+            }
         }
 
         if (!chapter) {
+
+            const available =
+                chapters
+                    .map(
+                        c =>
+                            c.attributes?.chapter
+                    )
+                    .filter(Boolean)
+                    .slice(0, 30);
 
             throw new Error(
-                `Chapter ${chapterNumber} was not found on MangaDex.`
+                `MangaDex chapter ${wanted} not found for "${title}". Available examples: ${available.join(", ")}`
             );
         }
 
-        // =====================================================
-        // 5. AT-HOME SERVER
-        // =====================================================
+        console.log(
+            `[MangaDex] Chapter selected: ${chapter.id}`
+        );
 
-        const chapterID =
-            chapter.id;
+        // ============================================
+        // 6. AT-HOME SERVER
+        // ============================================
 
-        const atHome =
-            await axios.get(
-                `${API}/at-home/server/${chapterID}`,
-                {
-                    timeout: 30000,
+        let atHome;
 
-                    headers: {
-                        "User-Agent":
-                            "HahariBot/1.0"
-                    }
-                }
+        try {
+
+            atHome =
+                await client.get(
+                    `${API}/at-home/server/${chapter.id}`
+                );
+
+        } catch (error) {
+
+            throw new Error(
+                `MangaDex at-home request failed: ${showError(error)}`
             );
+        }
 
-        const atHomeData =
+        const data =
             atHome.data;
 
-        if (!atHomeData?.baseUrl) {
+        if (!data?.baseUrl) {
 
             throw new Error(
-                "MangaDex did not return a page server."
+                "MangaDex did not return baseUrl."
             );
         }
 
         const hash =
-            atHomeData.chapter?.hash;
+            data.chapter?.hash;
 
-        const pageFiles =
-            atHomeData.chapter?.data || [];
+        const files =
+            data.chapter?.data || [];
 
-        if (!hash || !pageFiles.length) {
+        if (
+            !hash ||
+            !files.length
+        ) {
 
             throw new Error(
-                "No manga pages were returned."
+                "MangaDex returned no page files."
             );
         }
 
-        // =====================================================
-        // 6. BUILD PAGE URLS
-        // =====================================================
+        // ============================================
+        // 7. BUILD PAGES
+        // ============================================
 
         const pages =
-            pageFiles.map(file => {
+            files.map(
+                file =>
+                    `${data.baseUrl}/data/${hash}/${file}`
+            );
 
-                return (
-                    `${atHomeData.baseUrl}` +
-                    `/data/${hash}/${file}`
-                );
-            });
+        console.log(
+            `[MangaDex] Returning ${pages.length} pages`
+        );
 
         return {
             title,
+
             chapter:
                 chapter.attributes?.chapter ||
-                String(chapterNumber),
+                wanted,
+
+            source:
+                "MangaDex",
 
             pages
         };
