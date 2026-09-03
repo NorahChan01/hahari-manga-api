@@ -1,5 +1,5 @@
-const WitchToons = require("./witchtoons");
+const MangaBats = require("./mangabats");
 
 module.exports = [
-    WitchToons
+    MangaBats
 ];
