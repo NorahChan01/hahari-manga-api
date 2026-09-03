@@ -1,5 +1,5 @@
-const FlameComics = require("./flamecomics");
+const MangaRead = require("./mangaread");
 
 module.exports = [
-    FlameComics
+    MangaRead
 ];
