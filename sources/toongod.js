@@ -1,7 +1,7 @@
 const axios = require("axios");
 const cheerio = require("cheerio");
 
-const BASE_URL = "https://www.toongod.org";
+const BASE_URL = "https://toongod.cc";
 
 const client = axios.create({
 timeout: 30000,
