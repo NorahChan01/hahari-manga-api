@@ -57,12 +57,12 @@ app.get("/api/manga", async (req, res) => {
             ) {
 
                 return res.json({
-                    success: true,
-                    title: result.title,
-                    chapter: result.chapter,
-                    source: source.name,
-                    pages: result.pages
-                });
+    success: true,
+    title: result.title,
+    chapter: result.chapter,
+    source: result.source || source.name,
+    pages: result.pages
+});
             }
 
             errors.push({
