@@ -1,5 +1,5 @@
-const Rawkuma = require("./rawkuma");
+const MangaDenizi = require("./mangadenizi");
 
 module.exports = [
-    Rawkuma
+    MangaDenizi
 ];
