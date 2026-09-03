@@ -340,7 +340,9 @@ async function getChapter(mangaUrl, chapterNumber) {
 
     const html = chapterResponse.data;
 
-    const pages = extractImageUrls(html);
+    const pages = extractImageUrls(html).filter(url =>
+    !url.includes("/covers/")
+);
 
     if (!pages.length) {
         throw new Error(
