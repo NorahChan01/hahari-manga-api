@@ -3,8 +3,8 @@ const cheerio = require("cheerio");
 
 const BASE_URL = "https://www.mangaread.org";
 
-const client = axios.create({
-    timeout: 25000,
+const http = axios.create({
+    timeout: 30000,
     headers: {
         "User-Agent":
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
@@ -13,7 +13,8 @@ const client = axios.create({
         "Accept":
             "text/html,application/xhtml+xml,application/xml;q=0.9," +
             "image/avif,image/webp,image/apng,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9"
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache"
     }
 });
 
@@ -29,45 +30,7 @@ function slugify(text) {
     return normalize(text).replace(/\s+/g, "-");
 }
 
-function getChapterNumber(text) {
-    const match = String(text || "")
-        .match(/chapter[\s\-]*(\d+(?:\.\d+)?)/i);
-
-    if (match) {
-        return match[1];
-    }
-
-    const number = String(text || "")
-        .match(/\b(\d+(?:\.\d+)?)\b/);
-
-    return number ? number[1] : null;
-}
-
-function scoreTitle(found, wanted) {
-    const a = normalize(found);
-    const b = normalize(wanted);
-
-    if (!a || !b) return 0;
-
-    if (a === b) return 1000;
-    if (a.includes(b)) return 850;
-    if (b.includes(a)) return 800;
-
-    const aa = new Set(a.split(/\s+/));
-    const bb = new Set(b.split(/\s+/));
-
-    let common = 0;
-
-    for (const word of aa) {
-        if (bb.has(word)) {
-            common++;
-        }
-    }
-
-    return common * 20;
-}
-
-function absoluteUrl(url) {
+function absolute(url) {
     if (!url) return null;
 
     try {
@@ -77,97 +40,178 @@ function absoluteUrl(url) {
     }
 }
 
-async function searchManga(title) {
+function extractChapterNumber(text) {
+    const value = String(text || "");
+
+    let match = value.match(
+        /chapter[\s\-]*(\d+(?:\.\d+)?)/i
+    );
+
+    if (match) return match[1];
+
+    match = value.match(
+        /\/chapter[\-\/](\d+(?:\.\d+)?)/i
+    );
+
+    if (match) return match[1];
+
+    return null;
+}
+
+function chapterMatches(found, wanted) {
+    const a = String(found || "").trim();
+    const b = String(wanted || "").trim();
+
+    if (a === b) return true;
+
+    const na = Number(a);
+    const nb = Number(b);
+
+    return Number.isFinite(na) &&
+        Number.isFinite(nb) &&
+        na === nb;
+}
+
+/*
+ * MangaRead's manga pages use:
+ *
+ * https://www.mangaread.org/manga/one-piece/
+ *
+ * We first try the site's search, then use the direct slug.
+ */
+async function findManga(title) {
     const wanted = normalize(title);
 
-    // MangaRead uses WordPress/Madara-style manga pages.
-    // First try the site's search endpoint.
-    const searchUrls = [
-        `${BASE_URL}/?s=${encodeURIComponent(title)}&post_type=wp-manga`,
-        `${BASE_URL}/?s=${encodeURIComponent(title)}`
-    ];
+    /*
+     * 1. Try site search.
+     */
+    try {
+        const searchUrl =
+            `${BASE_URL}/?s=${encodeURIComponent(title)}`;
 
-    for (const searchUrl of searchUrls) {
-        try {
-            const response = await client.get(searchUrl);
+        const response = await http.get(searchUrl);
 
-            const $ = cheerio.load(response.data);
-            const results = [];
+        const $ = cheerio.load(response.data);
 
-            $("a").each((_, el) => {
-                const href = $(el).attr("href");
-                const text = $(el).text().trim();
+        const results = [];
 
-                if (!href || !text) return;
+        $("a[href]").each((_, element) => {
+            const href = $(element).attr("href");
+            const text = $(element).text().trim();
 
-                const url = absoluteUrl(href);
+            if (!href) return;
 
-                if (!url) return;
+            const url = absolute(href);
 
-                if (
-                    !url.includes("/manga/") ||
-                    url.includes("/chapter-")
-                ) {
-                    return;
-                }
+            if (!url) return;
 
-                const score = scoreTitle(text, title);
+            if (!url.includes("/manga/")) return;
 
-                if (score > 0) {
-                    if (
-                        !results.some(
-                            item => item.url === url
-                        )
-                    ) {
-                        results.push({
-                            title: text,
-                            url,
-                            score
-                        });
-                    }
-                }
-            });
+            if (url.includes("/chapter-")) return;
 
-            if (results.length) {
-                results.sort(
-                    (a, b) => b.score - a.score
+            const cleanTitle = normalize(text);
+
+            if (!cleanTitle) return;
+
+            let score = 0;
+
+            if (cleanTitle === wanted) {
+                score = 1000;
+            } else if (cleanTitle.includes(wanted)) {
+                score = 800;
+            } else if (wanted.includes(cleanTitle)) {
+                score = 700;
+            } else {
+                const wantedWords = wanted.split(" ");
+                const foundWords = cleanTitle.split(" ");
+
+                const common = wantedWords.filter(
+                    word => foundWords.includes(word)
+                ).length;
+
+                score = common * 50;
+            }
+
+            if (score > 0) {
+                const exists = results.find(
+                    item => item.url === url
                 );
 
-                return results[0];
+                if (!exists) {
+                    results.push({
+                        title: text,
+                        url,
+                        score
+                    });
+                }
             }
-        } catch (_) {}
-    }
+        });
 
-    // Direct slug fallback.
+        if (results.length) {
+            results.sort((a, b) => b.score - a.score);
+
+            return results[0];
+        }
+    } catch (_) {}
+
+    /*
+     * 2. Direct slug lookup.
+     *
+     * This is important because MangaRead has a very
+     * predictable /manga/{slug}/ structure.
+     */
     const slug = slugify(title);
 
-    const directUrls = [
+    const candidates = [
         `${BASE_URL}/manga/${slug}/`,
         `${BASE_URL}/manga/${slug}`
     ];
 
-    for (const url of directUrls) {
+    for (const url of candidates) {
         try {
-            const response = await client.get(url);
+            const response = await http.get(url);
 
-            if (response.status !== 200) {
-                continue;
-            }
+            if (response.status !== 200) continue;
 
             const $ = cheerio.load(response.data);
 
+            /*
+             * Don't require wp-manga classes.
+             * The actual MangaRead page has the manga title
+             * and chapter links directly in the HTML.
+             */
             const pageTitle =
-                $("div.summary_content h1").first().text().trim() ||
                 $("h1").first().text().trim() ||
-                title;
+                $("title").first().text().trim();
 
+            if (!pageTitle) continue;
+
+            const normalizedPageTitle =
+                normalize(pageTitle);
+
+            /*
+             * Make sure this is actually the requested manga.
+             */
             if (
-                response.data.includes("wp-manga") ||
-                response.data.includes("wp-manga-chapter") ||
-                response.data.includes("summary_content")
+                normalizedPageTitle === wanted ||
+                normalizedPageTitle.includes(wanted) ||
+                wanted.includes(normalizedPageTitle)
             ) {
                 return {
                     title: pageTitle,
+                    url
+                };
+            }
+
+            /*
+             * If the page contains chapter links and the
+             * expected slug, accept it as well.
+             */
+            if (
+                response.data.includes(`/manga/${slug}`)
+            ) {
+                return {
+                    title: pageTitle || title,
                     url
                 };
             }
@@ -177,119 +221,144 @@ async function searchManga(title) {
     return null;
 }
 
-async function findChapterUrl(mangaUrl, chapter) {
-    const response = await client.get(mangaUrl);
-
-    const $ = cheerio.load(response.data);
-
-    const wanted = String(chapter)
-        .replace(",", ".")
-        .trim();
-
-    let exactUrl = null;
-
-    // This is the actual MangaRead chapter structure:
-    // <li class="wp-manga-chapter">
-    //   <a href="...">Chapter 1111</a>
-    // </li>
-    $("li.wp-manga-chapter a").each((_, el) => {
-        if (exactUrl) return;
-
-        const href = $(el).attr("href");
-        const text = $(el).text().trim();
-
-        if (!href) return;
-
-        const number = getChapterNumber(text);
-
-        if (
-            number === wanted ||
-            normalize(text) ===
-                normalize(`Chapter ${chapter}`)
-        ) {
-            exactUrl = absoluteUrl(href);
+/*
+ * Find the exact chapter from the manga page.
+ */
+async function findChapter(mangaUrl, chapter) {
+    const response = await http.get(mangaUrl, {
+        headers: {
+            Referer: BASE_URL + "/"
         }
     });
 
-    if (exactUrl) {
-        return exactUrl;
-    }
+    const $ = cheerio.load(response.data);
 
-    // Broader fallback in case the theme changes.
-    $("a").each((_, el) => {
-        if (exactUrl) return;
+    const wanted = String(chapter).trim();
 
-        const href = $(el).attr("href");
-        const text = $(el).text().trim();
+    const candidates = [];
+
+    $("a[href]").each((_, element) => {
+        const href = $(element).attr("href");
+        const text = $(element).text().trim();
 
         if (!href) return;
 
-        const url = absoluteUrl(href);
+        const url = absolute(href);
 
-        if (!url || !url.includes("/chapter-")) {
+        if (!url) return;
+
+        /*
+         * MangaRead chapter URLs contain /chapter-
+         */
+        if (!url.toLowerCase().includes("/chapter-")) {
             return;
         }
 
         const number =
-            getChapterNumber(text) ||
-            getChapterNumber(url);
+            extractChapterNumber(text) ||
+            extractChapterNumber(url);
 
-        if (number === wanted) {
-            exactUrl = url;
+        if (!number) return;
+
+        if (chapterMatches(number, wanted)) {
+            candidates.push({
+                url,
+                text,
+                number
+            });
         }
     });
 
-    return exactUrl;
+    if (!candidates.length) {
+        return null;
+    }
+
+    /*
+     * Prefer the first exact chapter result.
+     */
+    return candidates[0].url;
 }
 
+/*
+ * Extract actual reader pages.
+ */
 function extractPages(html) {
     const $ = cheerio.load(html);
 
     const pages = [];
 
-    // Official extractor structure:
-    // div.reading-content
-    // img#image-*
-    $("div.reading-content img").each((_, el) => {
-        const candidates = [
-            $(el).attr("src"),
-            $(el).attr("data-src"),
-            $(el).attr("data-lazy-src"),
-            $(el).attr("data-original")
-        ];
+    /*
+     * MangaRead's actual reader uses images on the
+     * chapter page. reading-content is preferred.
+     */
+    const selectors = [
+        "div.reading-content img",
+        ".reading-content img",
+        ".chapter-content img",
+        ".entry-content img",
+        "img"
+    ];
 
-        for (const value of candidates) {
-            if (!value) continue;
+    for (const selector of selectors) {
+        $(selector).each((_, element) => {
+            const attributes = [
+                "src",
+                "data-src",
+                "data-lazy-src",
+                "data-original"
+            ];
 
-            const url = absoluteUrl(value);
+            for (const attribute of attributes) {
+                const value =
+                    $(element).attr(attribute);
 
-            if (!url) continue;
+                if (!value) continue;
 
-            // Reject obvious UI assets.
-            const lower = url.toLowerCase();
+                const url = absolute(value);
 
-            if (
-                lower.includes("logo") ||
-                lower.includes("avatar") ||
-                lower.includes("icon") ||
-                lower.includes("loading") ||
-                lower.includes("reader-win")
-            ) {
-                continue;
-            }
+                if (!url) continue;
 
-            // Manga pages should be image files.
-            if (
-                /\.(jpg|jpeg|png|webp|avif)(\?.*)?$/i.test(url)
-            ) {
-                if (!pages.includes(url)) {
-                    pages.push(url);
+                const lower = url.toLowerCase();
+
+                /*
+                 * Remove obvious website UI images.
+                 */
+                if (
+                    lower.includes("logo") ||
+                    lower.includes("avatar") ||
+                    lower.includes("icon") ||
+                    lower.includes("loading") ||
+                    lower.includes("spinner") ||
+                    lower.includes("reader-win") ||
+                    lower.includes("favicon")
+                ) {
+                    continue;
                 }
 
-                break;
+                /*
+                 * Only accept real image URLs.
+                 */
+                if (
+                    /\.(jpg|jpeg|png|webp|avif)(\?.*)?$/i
+                        .test(url)
+                ) {
+                    if (!pages.includes(url)) {
+                        pages.push(url);
+                    }
+
+                    break;
+                }
             }
+        });
+
+        /*
+         * If this selector produced real pages,
+         * don't fall through to generic img.
+         */
+        if (pages.length > 0) {
+            break;
         }
-    });
+    }
 
     return pages;
 }
@@ -307,8 +376,11 @@ async function getChapter(title, chapter) {
         throw new Error("Chapter number is required.");
     }
 
-    // 1. Find manga.
-    const manga = await searchManga(title);
+    /*
+     * STEP 1:
+     * Find manga.
+     */
+    const manga = await findManga(title);
 
     if (!manga) {
         throw new Error(
@@ -316,8 +388,11 @@ async function getChapter(title, chapter) {
         );
     }
 
-    // 2. Find exact chapter URL.
-    const chapterUrl = await findChapterUrl(
+    /*
+     * STEP 2:
+     * Find exact chapter.
+     */
+    const chapterUrl = await findChapter(
         manga.url,
         chapter
     );
@@ -328,8 +403,11 @@ async function getChapter(title, chapter) {
         );
     }
 
-    // 3. Open reader.
-    const response = await client.get(
+    /*
+     * STEP 3:
+     * Open chapter reader.
+     */
+    const chapterResponse = await http.get(
         chapterUrl,
         {
             headers: {
@@ -338,12 +416,17 @@ async function getChapter(title, chapter) {
         }
     );
 
-    // 4. Extract actual manga pages.
-    const pages = extractPages(response.data);
+    /*
+     * STEP 4:
+     * Extract pages.
+     */
+    const pages = extractPages(
+        chapterResponse.data
+    );
 
     if (!pages.length) {
         throw new Error(
-            `MangaRead chapter ${chapter} was found, but no real page images were extracted.`
+            `MangaRead found chapter ${chapter}, but no real manga page images were extracted.`
         );
     }
 
