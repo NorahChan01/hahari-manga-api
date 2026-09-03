@@ -1,5 +1,5 @@
-const MangaHub = require("./mangahub");
+const MangaHere = require("./mangahere");
 
 module.exports = [
-    MangaHub
+    MangaHere
 ];
