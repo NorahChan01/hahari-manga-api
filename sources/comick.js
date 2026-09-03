@@ -2,12 +2,14 @@ const axios = require("axios");
 
 const API = "https://api.comick.io";
 const WEB = "https://comick.io";
+const IMAGE_HOST = "https://meo.comick.pictures";
 
 const headers = {
     Accept: "application/json",
     "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+        "AppleWebKit/537.36 (KHTML, like Gecko) " +
+        "Chrome/131.0.0.0 Safari/537.36",
     Referer: `${WEB}/`
 };
 
@@ -37,7 +39,7 @@ function chapterMatches(value, wanted) {
     );
 }
 
-async function request(url, config = {}) {
+async function get(url, config = {}) {
     return axios.get(url, {
         timeout: 30000,
         headers,
@@ -51,15 +53,14 @@ module.exports = {
     async getChapter(mangaName, chapterNumber) {
 
         // =====================================================
-        // 1. SEARCH COMICK
+        // 1. SEARCH
         // =====================================================
 
-        const searchResponse = await request(
+        const searchResponse = await get(
             `${API}/v1.0/search`,
             {
                 params: {
-                    q: mangaName,
-                    limit: 10
+                    q: mangaName
                 }
             }
         );
@@ -80,92 +81,89 @@ module.exports = {
         }
 
         // =====================================================
-        // 2. PICK BEST TITLE MATCH
+        // 2. SELECT MANGA
         // =====================================================
 
-        const query = normalize(mangaName);
+        const normalizedQuery =
+            normalize(mangaName);
 
-        let comic = results.find(item => {
-            return normalize(
-                item.title ||
-                item.name ||
-                ""
-            ) === query;
+        let manga = results.find(item => {
+
+            const possibleTitles = [
+                item.title,
+                item.name,
+                item.comic?.title
+            ];
+
+            return possibleTitles.some(title =>
+                normalize(title) === normalizedQuery
+            );
         });
 
-        // Search result usually has hid/slug.
-        // If exact match isn't found, use first result.
-        if (!comic) {
-            comic = results[0];
+        if (!manga) {
+            manga = results[0];
         }
 
         const hid =
-            comic.hid ||
-            comic.id ||
-            comic.comic?.hid;
+            manga.hid ||
+            manga.comic?.hid ||
+            manga.id;
+
+        const slug =
+            manga.slug ||
+            manga.comic?.slug;
+
+        const title =
+            manga.title ||
+            manga.name ||
+            manga.comic?.title ||
+            mangaName;
 
         if (!hid) {
             throw new Error(
-                "Comick search did not return a comic ID."
+                "Comick search did not return a manga ID."
             );
         }
 
-        const title =
-            comic.title ||
-            comic.name ||
-            comic.comic?.title ||
-            mangaName;
-
-        const slug =
-            comic.slug ||
-            comic.comic?.slug ||
-            "";
+        if (!slug) {
+            throw new Error(
+                "Comick search did not return a manga slug."
+            );
+        }
 
         // =====================================================
-        // 3. FIND CHAPTER
+        // 3. GET CHAPTER LIST
         // =====================================================
 
-        let chapters = [];
+        /*
+         * Current Comick endpoint:
+         *
+         * /comic/{hid}/chapters
+         *
+         * We request English chapters.
+         *
+         * `chap` is deliberately NOT sent here.
+         * We fetch the chapter list and select the
+         * requested chapter locally.
+         */
 
-        let page = 1;
-
-        const MAX_PAGES = 20;
-
-        while (page <= MAX_PAGES) {
-
-            const response = await request(
-                `${API}/comic/${encodeURIComponent(hid)}/chapters`,
-                {
-                    params: {
-                        lang: "en",
-                        limit: 100,
-                        page,
-                        "chap-order": 0
-                    }
+        const chapterResponse = await get(
+            `${API}/comic/${encodeURIComponent(hid)}/chapters`,
+            {
+                params: {
+                    lang: "en"
                 }
-            );
-
-            const data =
-                response.data?.chapters ||
-                response.data?.data ||
-                [];
-
-            if (!Array.isArray(data) || !data.length) {
-                break;
             }
+        );
 
-            chapters.push(...data);
+        const chapters =
+            chapterResponse.data?.chapters ||
+            [];
 
-            // If fewer than requested, there is
-            // probably no next page.
-            if (data.length < 100) {
-                break;
-            }
-
-            page++;
-        }
-
-        if (!chapters.length) {
+        if (
+            !Array.isArray(chapters) ||
+            !chapters.length
+        ) {
             throw new Error(
                 `No English chapters found for "${title}".`
             );
@@ -175,12 +173,66 @@ module.exports = {
         // 4. FIND REQUESTED CHAPTER
         // =====================================================
 
-        let chapter = chapters.find(ch => {
-            return chapterMatches(
+        let chapter = chapters.find(ch =>
+            chapterMatches(
                 ch.chap,
                 chapterNumber
-            );
-        });
+            )
+        );
+
+        /*
+         * Some Comick chapter lists are paginated.
+         *
+         * If the requested chapter isn't in the first
+         * response, continue through additional pages.
+         */
+
+        if (!chapter) {
+
+            let page = 2;
+
+            const MAX_PAGES = 30;
+
+            while (
+                page <= MAX_PAGES &&
+                !chapter
+            ) {
+
+                const response = await get(
+                    `${API}/comic/${encodeURIComponent(hid)}/chapters`,
+                    {
+                        params: {
+                            lang: "en",
+                            page
+                        }
+                    }
+                );
+
+                const more =
+                    response.data?.chapters ||
+                    [];
+
+                if (
+                    !Array.isArray(more) ||
+                    !more.length
+                ) {
+                    break;
+                }
+
+                chapter = more.find(ch =>
+                    chapterMatches(
+                        ch.chap,
+                        chapterNumber
+                    )
+                );
+
+                if (more.length < 100) {
+                    break;
+                }
+
+                page++;
+            }
+        }
 
         if (!chapter) {
             throw new Error(
@@ -188,18 +240,22 @@ module.exports = {
             );
         }
 
+        // =====================================================
+        // 5. CHAPTER INFORMATION
+        // =====================================================
+
         const chapterHid =
             chapter.hid ||
             chapter.chapter_hid ||
             chapter.id;
 
-        const lang =
-            chapter.lang ||
-            "en";
-
         const chap =
             chapter.chap ||
             String(chapterNumber);
+
+        const lang =
+            chapter.lang ||
+            "en";
 
         if (!chapterHid) {
             throw new Error(
@@ -208,56 +264,47 @@ module.exports = {
         }
 
         // =====================================================
-        // 5. GET CHAPTER PAGE
+        // 6. BUILD CHAPTER PAGE
         // =====================================================
-
-        /*
-         * Comick's chapter page contains Next.js data
-         * including md_images.
-         *
-         * This is intentionally separate from MangaDex.
-         */
-
-        if (!slug) {
-            throw new Error(
-                "Comick search did not return a manga slug."
-            );
-        }
 
         const chapterURL =
             `${WEB}/comic/${slug}/` +
             `${chapterHid}-chapter-${chap}-${lang}`;
 
-        const pageResponse = await axios.get(
-            chapterURL,
-            {
-                timeout: 30000,
-                headers: {
-                    ...headers,
-                    Accept:
-                        "text/html,application/xhtml+xml"
+        const pageResponse =
+            await axios.get(
+                chapterURL,
+                {
+                    timeout: 30000,
+                    headers: {
+                        ...headers,
+                        Accept:
+                            "text/html,application/xhtml+xml"
+                    }
                 }
-            }
-        );
+            );
 
         const html = pageResponse.data;
 
-        if (!html || typeof html !== "string") {
+        if (
+            !html ||
+            typeof html !== "string"
+        ) {
             throw new Error(
                 "Comick returned an invalid chapter page."
             );
         }
 
         // =====================================================
-        // 6. EXTRACT __NEXT_DATA__
+        // 7. EXTRACT NEXT.JS DATA
         // =====================================================
 
-        const nextDataMatch =
+        const match =
             html.match(
                 /<script[^>]*id=["']__NEXT_DATA__["'][^>]*>([\s\S]*?)<\/script>/i
             );
 
-        if (!nextDataMatch) {
+        if (!match) {
             throw new Error(
                 "Comick chapter page did not contain __NEXT_DATA__."
             );
@@ -267,41 +314,47 @@ module.exports = {
 
         try {
             nextData =
-                JSON.parse(nextDataMatch[1]);
-        } catch (error) {
+                JSON.parse(match[1]);
+        } catch {
             throw new Error(
                 "Could not parse Comick chapter data."
             );
         }
 
         const pageProps =
-            nextData?.props?.pageProps || {};
+            nextData?.props?.pageProps ||
+            {};
 
         const chapterData =
             pageProps.chapter ||
             pageProps.chapterData ||
-            pageProps;
+            {};
 
         const imageData =
-            chapterData?.md_images ||
-            pageProps?.md_images ||
+            chapterData.md_images ||
+            pageProps.md_images ||
             [];
 
-        if (!Array.isArray(imageData) || !imageData.length) {
+        if (
+            !Array.isArray(imageData) ||
+            !imageData.length
+        ) {
             throw new Error(
                 "Comick did not return manga pages."
             );
         }
 
         // =====================================================
-        // 7. CONVERT IMAGE DATA TO URLS
+        // 8. BUILD IMAGE URLS
         // =====================================================
 
         const pages = imageData
             .map(image => {
 
-                // Some versions return strings.
-                if (typeof image === "string") {
+                if (
+                    typeof image === "string"
+                ) {
+
                     if (
                         image.startsWith("http://") ||
                         image.startsWith("https://")
@@ -309,45 +362,46 @@ module.exports = {
                         return image;
                     }
 
-                    return `https://meo.comick.pictures/${image}`;
+                    return `${IMAGE_HOST}/${image}`;
                 }
 
-                if (!image || typeof image !== "object") {
+                if (
+                    !image ||
+                    typeof image !== "object"
+                ) {
                     return null;
                 }
 
-                // Different Comick responses have used
-                // different property names.
-                const url =
+                const value =
+                    image.b2key ||
                     image.url ||
                     image.src ||
                     image.image ||
-                    image.b2key ||
                     image.path;
 
-                if (!url) {
+                if (!value) {
                     return null;
                 }
 
                 if (
-                    url.startsWith("http://") ||
-                    url.startsWith("https://")
+                    value.startsWith("http://") ||
+                    value.startsWith("https://")
                 ) {
-                    return url;
+                    return value;
                 }
 
-                return `https://meo.comick.pictures/${url}`;
+                return `${IMAGE_HOST}/${value}`;
             })
             .filter(Boolean);
 
         if (!pages.length) {
             throw new Error(
-                "Comick returned page data, but no usable image URLs."
+                "Comick returned no usable image URLs."
             );
         }
 
         // =====================================================
-        // 8. RETURN STANDARD FORMAT
+        // 9. STANDARD API RESPONSE
         // =====================================================
 
         return {
