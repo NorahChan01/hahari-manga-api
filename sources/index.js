@@ -1,5 +1,5 @@
-const MangaTaro = require("./mangataro");
+const ManhuaPlus = require("./manhuaplus");
 
 module.exports = [
-    MangaTaro
+    ManhuaPlus
 ];
