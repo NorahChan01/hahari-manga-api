@@ -1,76 +1,65 @@
 const express = require("express");
-const mangaSources = require("./sources");
+const sources = require("./sources");
 
 const app = express();
 
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json());
-
 app.get("/", (req, res) => {
     res.json({
         success: true,
         name: "Hahari Manga API",
-        version: "2.0.0",
-        status: "online",
-        sources: mangaSources.map(source => source.name)
+        version: "1.0.0",
+        status: "online"
     });
 });
 
 app.get("/api/manga", async (req, res) => {
 
-    const title = String(req.query.title || "").trim();
-    const chapter = String(req.query.chapter || "").trim();
+    const mangaName = String(
+        req.query.title || ""
+    ).trim();
 
-    if (!title) {
+    const chapterNumber = String(
+        req.query.chapter || ""
+    ).trim();
+
+    if (!mangaName || !chapterNumber) {
         return res.status(400).json({
             success: false,
-            error: "Missing title",
-            usage: "/api/manga?title=100%20girlfriends&chapter=214"
+            error: "title and chapter are required.",
+            example:
+                "/api/manga?title=naruto&chapter=11"
         });
     }
-
-    if (!chapter) {
-        return res.status(400).json({
-            success: false,
-            error: "Missing chapter",
-            usage: "/api/manga?title=100%20girlfriends&chapter=214"
-        });
-    }
-
-    console.log(
-        `[MANGA] Searching "${title}" chapter ${chapter}`
-    );
 
     const errors = [];
 
-    for (const source of mangaSources) {
+    for (const source of sources) {
 
         try {
 
             console.log(
-                `[MANGA] Trying ${source.name}...`
+                `[MANGA] Trying ${source.name}: ` +
+                `${mangaName} chapter ${chapterNumber}`
             );
 
-            const result = await source.getChapter(
-                title,
-                chapter
-            );
+            const result =
+                await source.getChapter(
+                    mangaName,
+                    chapterNumber
+                );
 
             if (
                 result &&
                 Array.isArray(result.pages) &&
-                result.pages.length > 0
+                result.pages.length
             ) {
-
-                console.log(
-                    `[MANGA] ${source.name} found ${result.pages.length} pages`
-                );
 
                 return res.json({
                     success: true,
-                    title: result.title || title,
-                    chapter: result.chapter || chapter,
+                    title: result.title,
+                    chapter: result.chapter,
                     source: source.name,
                     pages: result.pages
                 });
@@ -78,13 +67,13 @@ app.get("/api/manga", async (req, res) => {
 
             errors.push({
                 source: source.name,
-                error: "Chapter not found"
+                error: "Source returned no pages."
             });
 
         } catch (error) {
 
             console.error(
-                `[MANGA] ${source.name} failed:`,
+                `[${source.name}]`,
                 error.message
             );
 
@@ -97,18 +86,10 @@ app.get("/api/manga", async (req, res) => {
 
     return res.status(404).json({
         success: false,
-        error: "Chapter not found",
-        title,
-        chapter,
+        error: "Chapter not found on available sources.",
+        title: mangaName,
+        chapter: chapterNumber,
         sourcesTried: errors
-    });
-});
-
-app.get("/api/manga/health", (req, res) => {
-    res.json({
-        success: true,
-        status: "healthy",
-        sources: mangaSources.map(source => source.name)
     });
 });
 
