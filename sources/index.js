@@ -1,5 +1,5 @@
-const WeebCentral = require("./weebcentral");
+const MangaTaro = require("./mangataro");
 
 module.exports = [
-    WeebCentral
+    MangaTaro
 ];
