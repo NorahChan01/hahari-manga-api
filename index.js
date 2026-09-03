@@ -53,7 +53,7 @@ function createImageToken(image_url, scramble) {
 }
 
 /*
- * Normalize title.
+ * Normalize manga titles.
  */
 function normalizeTitle(text) {
     return String(text || "")
@@ -68,7 +68,7 @@ function normalizeTitle(text) {
 }
 
 /*
- * Clean common title prefixes/suffixes.
+ * Remove common title prefixes/suffixes.
  */
 function cleanTitle(text) {
     return normalizeTitle(text)
@@ -84,25 +84,14 @@ function cleanTitle(text) {
 }
 
 /*
- * Check if request is a numeric ID.
- *
- * This is important for nHentai.
- *
- * Example:
- *
- * -manga 535539 2
- *
- * "535539" is not a manga title.
- * It is a gallery ID.
- */
-function isNumericId(text) {
-    return /^\d+$/.test(
-        String(text || "").trim()
-    );
-}
-
-/*
  * Calculate title similarity.
+ *
+ * 100 = exact title
+ * 95  = exact after cleaning
+ * 90  = strong containment
+ * 85  = very strong word match
+ * 75  = strong word match
+ * <75 = reject
  */
 function titleMatchScore(requested, returned) {
     const wanted =
@@ -111,19 +100,24 @@ function titleMatchScore(requested, returned) {
     const actual =
         normalizeTitle(returned);
 
-    if (!wanted || !actual) {
+    if (
+        !wanted ||
+        !actual
+    ) {
         return 0;
     }
 
     /*
      * Exact title.
      */
-    if (wanted === actual) {
+    if (
+        wanted === actual
+    ) {
         return 100;
     }
 
     /*
-     * Exact match after removing common words.
+     * Exact after removing common words.
      */
     const cleanWanted =
         cleanTitle(requested);
@@ -140,7 +134,7 @@ function titleMatchScore(requested, returned) {
     }
 
     /*
-     * Very short titles are kept strict.
+     * Short titles need strict matching.
      */
     if (
         wanted.length < 4 ||
@@ -150,7 +144,11 @@ function titleMatchScore(requested, returned) {
     }
 
     /*
-     * Containment matching.
+     * Containment.
+     *
+     * Example:
+     * "naruto"
+     * "naruto shippuden"
      */
     if (
         actual.includes(wanted) ||
@@ -203,7 +201,9 @@ function titleMatchScore(requested, returned) {
 
     let matched = 0;
 
-    for (const wantedWord of wantedWords) {
+    for (
+        const wantedWord of wantedWords
+    ) {
 
         if (
             actualWords.includes(
@@ -214,6 +214,10 @@ function titleMatchScore(requested, returned) {
             continue;
         }
 
+        /*
+         * Allow partial word matching only
+         * for reasonably long words.
+         */
         if (
             wantedWord.length >= 5 &&
             actualWords.some(
@@ -233,11 +237,15 @@ function titleMatchScore(requested, returned) {
     const coverage =
         matched / wantedWords.length;
 
-    if (coverage >= 0.9) {
+    if (
+        coverage >= 0.9
+    ) {
         return 85;
     }
 
-    if (coverage >= 0.75) {
+    if (
+        coverage >= 0.75
+    ) {
         return 75;
     }
 
@@ -261,33 +269,53 @@ function titleMatchScore(requested, returned) {
 }
 
 /*
- * Determine whether a result is acceptable.
+ * Check whether the source is nHentai.
  *
- * Numeric IDs are automatically accepted.
+ * We intentionally identify nHentai by source.name.
  */
-function isAcceptableMatch(
+function isNHentaiSource(source) {
+    return (
+        source &&
+        String(source.name || "")
+            .toLowerCase() ===
+            "nhentai"
+    );
+}
+
+/*
+ * Check whether the request is a numeric ID.
+ */
+function isNumericRequest(title) {
+    return /^\d+$/.test(
+        String(title || "").trim()
+    );
+}
+
+/*
+ * Determine whether a normal title result is acceptable.
+ *
+ * Numeric IDs are NOT accepted here.
+ * They are handled separately and only by nHentai.
+ */
+function isAcceptableTitleMatch(
     requestedTitle,
     result
 ) {
-    if (!result) {
-        return false;
-    }
-
     /*
-     * Numeric requests are direct IDs.
-     *
-     * Example:
-     * 535539
+     * Never use generic title matching for numeric IDs.
      */
     if (
-        isNumericId(
+        isNumericRequest(
             requestedTitle
         )
     ) {
-        return true;
+        return false;
     }
 
-    if (!result.title) {
+    if (
+        !result ||
+        !result.title
+    ) {
         return false;
     }
 
@@ -302,6 +330,9 @@ function isAcceptableMatch(
 
 /*
  * Process source pages.
+ *
+ * MangaDenizi returns page objects.
+ * Other sources return normal URLs.
  */
 function processResultPages(
     source,
@@ -312,12 +343,7 @@ function processResultPages(
         result.pages;
 
     /*
-     * MangaDenizi returns:
-     *
-     * {
-     *   image_url,
-     *   scramble
-     * }
+     * MangaDenizi image processing.
      */
     if (
         source.name === "MangaDenizi" &&
@@ -342,7 +368,8 @@ function processResultPages(
             );
 
         /*
-         * Convert relative URLs to absolute URLs.
+         * Convert relative proxy URLs
+         * into absolute URLs.
          */
         pages =
             pages.map(
@@ -359,7 +386,7 @@ function processResultPages(
 }
 
 /*
- * Root.
+ * Root endpoint.
  */
 app.get("/", (req, res) => {
 
@@ -406,18 +433,143 @@ app.get(
 
         const errors = [];
 
-        /*
-         * Determine whether this is a direct numeric ID.
-         */
         const numericRequest =
-            isNumericId(
+            isNumericRequest(
                 mangaName
             );
 
         /*
-         * Ask every source.
+         * =====================================================
+         * NUMERIC ID MODE
+         * =====================================================
          *
-         * We don't immediately accept the first result.
+         * Numeric IDs are ONLY handled by nHentai.
+         *
+         * Example:
+         *
+         * -manga 535539 2
+         *
+         * Only nHentai gets called.
+         */
+        if (
+            numericRequest
+        ) {
+
+            const nhentai =
+                sources.find(
+                    source =>
+                        isNHentaiSource(
+                            source
+                        )
+                );
+
+            if (!nhentai) {
+
+                return res.status(404).json({
+                    success: false,
+                    error:
+                        "nHentai source is not available for numeric gallery IDs.",
+                    title:
+                        mangaName,
+                    chapter:
+                        chapterNumber
+                });
+
+            }
+
+            try {
+
+                console.log(
+                    `[MANGA] Numeric ID detected: ${mangaName}`
+                );
+
+                console.log(
+                    `[MANGA] Sending numeric ID only to nHentai: ` +
+                    `${mangaName} chapter ${chapterNumber}`
+                );
+
+                const result =
+                    await nhentai.getChapter(
+                        mangaName,
+                        chapterNumber
+                    );
+
+                if (
+                    result &&
+                    Array.isArray(
+                        result.pages
+                    ) &&
+                    result.pages.length
+                ) {
+
+                    console.log(
+                        `[MANGA] nHentai successfully returned ` +
+                        `gallery ${mangaName}`
+                    );
+
+                    const pages =
+                        processResultPages(
+                            nhentai,
+                            result,
+                            req
+                        );
+
+                    return res.json({
+                        success: true,
+                        title:
+                            result.title,
+                        chapter:
+                            result.chapter,
+                        source:
+                            result.source ||
+                            nhentai.name,
+                        pages
+                    });
+
+                }
+
+                errors.push({
+                    source:
+                        nhentai.name,
+                    error:
+                        "nHentai returned no pages."
+                });
+
+            } catch (error) {
+
+                console.error(
+                    `[nHentai]`,
+                    error.message
+                );
+
+                errors.push({
+                    source:
+                        nhentai.name,
+                    error:
+                        error.message
+                });
+
+            }
+
+            return res.status(404).json({
+                success: false,
+                error:
+                    "nHentai gallery could not be loaded.",
+                title:
+                    mangaName,
+                chapter:
+                    chapterNumber,
+                sourcesTried:
+                    errors
+            });
+        }
+
+        /*
+         * =====================================================
+         * NORMAL TITLE SEARCH MODE
+         * =====================================================
+         *
+         * For normal titles we check all sources.
          */
         const results =
             await Promise.all(
@@ -445,19 +597,11 @@ app.get(
                                 result.pages.length
                             ) {
 
-                                /*
-                                 * Numeric ID:
-                                 *
-                                 * Do NOT compare the ID against
-                                 * the returned gallery title.
-                                 */
                                 const score =
-                                    numericRequest
-                                        ? 100
-                                        : titleMatchScore(
-                                            mangaName,
-                                            result.title
-                                        );
+                                    titleMatchScore(
+                                        mangaName,
+                                        result.title
+                                    );
 
                                 console.log(
                                     `[MANGA] ${source.name} returned ` +
@@ -501,7 +645,7 @@ app.get(
             );
 
         /*
-         * Collect source errors.
+         * Collect errors.
          */
         for (
             const item of results
@@ -523,7 +667,7 @@ app.get(
         }
 
         /*
-         * Only sources that returned pages.
+         * Sources that actually returned pages.
          */
         const validResults =
             results.filter(
@@ -536,21 +680,19 @@ app.get(
             );
 
         /*
-         * Find acceptable results.
-         *
-         * Numeric IDs automatically pass.
+         * Keep only strong title matches.
          */
         const acceptableResults =
             validResults.filter(
                 item =>
-                    isAcceptableMatch(
+                    isAcceptableTitleMatch(
                         mangaName,
                         item.result
                     )
             );
 
         /*
-         * Highest match wins.
+         * Highest title score wins.
          */
         acceptableResults.sort(
             (a, b) =>
@@ -558,7 +700,7 @@ app.get(
         );
 
         /*
-         * Select the best result.
+         * Return best result.
          */
         if (
             acceptableResults.length
@@ -604,25 +746,16 @@ app.get(
          * No acceptable result.
          */
         console.log(
-            `[MANGA] No acceptable title match for "${mangaName}".`
+            `[MANGA] No acceptable title match for ` +
+            `"${mangaName}".`
         );
 
         /*
-         * Add rejected results to error information.
+         * Explain rejected results.
          */
         for (
             const item of validResults
         ) {
-
-            /*
-             * Numeric requests should never reach here,
-             * but keep this safe.
-             */
-            if (
-                numericRequest
-            ) {
-                continue;
-            }
 
             const score =
                 titleMatchScore(
@@ -665,7 +798,9 @@ app.get(
 );
 
 /*
- * MangaDenizi image proxy.
+ * ============================================================
+ * MangaDenizi IMAGE PROXY
+ * ============================================================
  */
 app.get(
     "/api/manga/image/:token",
@@ -703,6 +838,9 @@ app.get(
 
         try {
 
+            /*
+             * Find MangaDenizi.
+             */
             const MangaDenizi =
                 sources.find(
                     source =>
@@ -732,6 +870,9 @@ app.get(
                     cached.scramble
                 );
 
+            /*
+             * Response content type.
+             */
             res.setHeader(
                 "Content-Type",
                 processed.contentType ||
@@ -750,7 +891,7 @@ app.get(
         } catch (error) {
 
             console.error(
-                "[MangaDenizi IMAGE ERROR]",
+                "[MANGA DENIZI IMAGE ERROR]",
                 error.message
             );
 
@@ -764,7 +905,7 @@ app.get(
 );
 
 /*
- * Error handler.
+ * Global error handler.
  */
 app.use(
     (error, req, res, next) => {
