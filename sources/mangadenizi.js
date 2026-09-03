@@ -1,5 +1,4 @@
 const axios = require("axios");
-const sharp = require("sharp");
 
 const BASE_URL = "https://mangadenizi.net";
 const API_BASE = `${BASE_URL}/api/v1/web`;
@@ -11,11 +10,20 @@ const DEFAULT_HEADERS = {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
         "AppleWebKit/537.36 (KHTML, like Gecko) " +
         "Chrome/139.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer": `${BASE_URL}/`
+
+    "Accept":
+        "application/json, text/plain, */*",
+
+    "Accept-Language":
+        "en-US,en;q=0.9",
+
+    "Referer":
+        `${BASE_URL}/`
 };
 
+/*
+ * Normalize text for manga title matching.
+ */
 function normalize(text) {
     return String(text || "")
         .toLowerCase()
@@ -25,25 +33,38 @@ function normalize(text) {
         .trim();
 }
 
+/*
+ * Convert manga title into a likely slug.
+ */
 function slugify(text) {
     return normalize(text)
         .replace(/\s+/g, "-");
 }
 
+/*
+ * GET helper.
+ */
 async function apiGet(url, options = {}) {
-    return axios.get(url, {
-        timeout: 30000,
-        maxRedirects: 5,
-        headers: {
-            ...DEFAULT_HEADERS,
-            ...(options.headers || {})
-        },
-        ...options
-    });
+
+    return axios.get(
+        url,
+        {
+            timeout: 30000,
+
+            maxRedirects: 5,
+
+            headers: {
+                ...DEFAULT_HEADERS,
+                ...(options.headers || {})
+            },
+
+            ...options
+        }
+    );
 }
 
 /*
- * Convert a value into an unsigned 32-bit integer.
+ * Convert to unsigned 32-bit integer.
  */
 function uint32(value) {
     return Number(value) >>> 0;
@@ -53,26 +74,41 @@ function uint32(value) {
  * MangaDenizi XorShift32 PRNG.
  */
 function xorshift32(state) {
+
     state = uint32(state);
 
-    state ^= uint32(state << 13);
-    state ^= state >>> 17;
-    state ^= uint32(state << 5);
+    state ^=
+        uint32(
+            state << 13
+        );
+
+    state ^=
+        state >>> 17;
+
+    state ^=
+        uint32(
+            state << 5
+        );
 
     return uint32(state);
 }
 
 /*
- * Generate a deterministic Fisher-Yates shuffle.
- *
- * This follows MangaDenizi's current tiled-v1
- * scrambling implementation.
+ * Generate MangaDenizi Fisher-Yates shuffle.
  */
-function makeShuffle(size, seed, salt) {
-    const result = Array.from(
-        { length: size },
-        (_, i) => i
-    );
+function makeShuffle(
+    size,
+    seed,
+    salt
+) {
+
+    const result =
+        Array.from(
+            {
+                length: size
+            },
+            (_, i) => i
+        );
 
     let state =
         uint32(seed) ^
@@ -87,16 +123,22 @@ function makeShuffle(size, seed, salt) {
         i > 0;
         i--
     ) {
-        state = xorshift32(state);
+
+        state =
+            xorshift32(state);
 
         const j =
             state %
             (i + 1);
 
-        const temp = result[i];
+        const temp =
+            result[i];
 
-        result[i] = result[j];
-        result[j] = temp;
+        result[i] =
+            result[j];
+
+        result[j] =
+            temp;
     }
 
     return result;
@@ -104,12 +146,11 @@ function makeShuffle(size, seed, salt) {
 
 /*
  * XOR descrambling.
- *
- * MangaDenizi supplies the key through:
- *
- * X-Scramble-Key
  */
-function xorBuffer(buffer, key) {
+function xorBuffer(
+    buffer,
+    key
+) {
 
     if (
         key === undefined ||
@@ -120,7 +161,9 @@ function xorBuffer(buffer, key) {
 
     let numericKey = key;
 
-    if (typeof numericKey === "string") {
+    if (
+        typeof numericKey === "string"
+    ) {
 
         const trimmed =
             numericKey.trim();
@@ -128,12 +171,15 @@ function xorBuffer(buffer, key) {
         if (
             /^0x[0-9a-f]+$/i.test(trimmed)
         ) {
+
             numericKey =
                 parseInt(
                     trimmed,
                     16
                 );
+
         } else {
+
             numericKey =
                 Number(trimmed);
         }
@@ -143,7 +189,9 @@ function xorBuffer(buffer, key) {
         Number(numericKey);
 
     if (
-        !Number.isFinite(numericKey)
+        !Number.isFinite(
+            numericKey
+        )
     ) {
         return buffer;
     }
@@ -159,15 +207,16 @@ function xorBuffer(buffer, key) {
         i < output.length;
         i++
     ) {
-        output[i] ^= numericKey;
+
+        output[i] ^=
+            numericKey;
     }
 
     return output;
 }
 
 /*
- * Convert a seed supplied by MangaDenizi
- * into a usable unsigned 32-bit value.
+ * Convert MangaDenizi seed to uint32.
  */
 function parseSeed(value) {
 
@@ -182,6 +231,7 @@ function parseSeed(value) {
         typeof value === "number" &&
         Number.isFinite(value)
     ) {
+
         return uint32(value);
     }
 
@@ -195,6 +245,7 @@ function parseSeed(value) {
     if (
         /^0x[0-9a-f]+$/i.test(text)
     ) {
+
         return uint32(
             parseInt(
                 text,
@@ -209,6 +260,7 @@ function parseSeed(value) {
     if (
         Number.isFinite(number)
     ) {
+
         return uint32(number);
     }
 
@@ -216,77 +268,95 @@ function parseSeed(value) {
 }
 
 /*
- * Parse the MangaDenizi grid.
+ * Parse MangaDenizi grid.
  *
- * Examples:
+ * IMPORTANT:
  *
- * { columns: 4, rows: 5 }
+ * MangaDenizi's tiled-v1 payload uses:
  *
- * or
+ *     grid: 4
  *
- * [4, 5]
+ * NOT:
+ *
+ *     { columns: 4, rows: 4 }
+ *
+ * The single number means:
+ *
+ *     4 x 4
  */
 function parseGrid(grid) {
 
-    if (!grid) {
+    if (
+        grid === undefined ||
+        grid === null ||
+        grid === ""
+    ) {
         return null;
     }
 
-    if (Array.isArray(grid)) {
+    /*
+     * Normal MangaDenizi format:
+     *
+     * grid = number
+     */
+    const value =
+        Number(grid);
 
-        if (grid.length >= 2) {
+    if (
+        Number.isInteger(value) &&
+        value > 0
+    ) {
 
-            const columns =
-                Number(grid[0]);
+        return value;
+    }
 
-            const rows =
-                Number(grid[1]);
+    /*
+     * Fallback for array format.
+     */
+    if (
+        Array.isArray(grid)
+    ) {
 
-            if (
-                Number.isInteger(columns) &&
-                Number.isInteger(rows) &&
-                columns > 0 &&
-                rows > 0
-            ) {
-                return {
-                    columns,
-                    rows
-                };
-            }
+        const first =
+            Number(grid[0]);
+
+        if (
+            Number.isInteger(first) &&
+            first > 0
+        ) {
+
+            return first;
         }
 
         return null;
     }
 
+    /*
+     * Fallback for object format.
+     */
     if (
         typeof grid === "object"
     ) {
 
-        const columns =
+        const objectValue =
             Number(
                 grid.columns ??
                 grid.cols ??
                 grid.x ??
-                grid.width
-            );
-
-        const rows =
-            Number(
+                grid.width ??
                 grid.rows ??
                 grid.y ??
                 grid.height
             );
 
         if (
-            Number.isInteger(columns) &&
-            Number.isInteger(rows) &&
-            columns > 0 &&
-            rows > 0
+            Number.isInteger(
+                objectValue
+            ) &&
+            objectValue > 0
         ) {
-            return {
-                columns,
-                rows
-            };
+
+            return objectValue;
         }
     }
 
@@ -294,17 +364,68 @@ function parseGrid(grid) {
 }
 
 /*
+ * Split a dimension into equal regions.
+ *
+ * This follows MangaDenizi's region calculation:
+ *
+ * start = floor(index * size / count)
+ * end   = floor((index + 1) * size / count)
+ */
+function splitDimension(
+    totalSize,
+    regionCount
+) {
+
+    const size =
+        Math.max(
+            1,
+            Math.floor(totalSize)
+        );
+
+    const count =
+        Math.max(
+            1,
+            Math.min(
+                Math.floor(regionCount),
+                size
+            )
+        );
+
+    return Array.from(
+        {
+            length: count
+        },
+        (_, index) => {
+
+            const start =
+                Math.floor(
+                    index *
+                    size /
+                    count
+                );
+
+            const end =
+                Math.floor(
+                    (index + 1) *
+                    size /
+                    count
+                );
+
+            return {
+                offset: start,
+
+                length:
+                    Math.max(
+                        1,
+                        end - start
+                    )
+            };
+        }
+    );
+}
+
+/*
  * Reconstruct a MangaDenizi tiled-v1 image.
- *
- * The original image is divided into:
- *
- *   columns
- *   rows
- *
- * regions.
- *
- * The columns and rows are independently
- * shuffled using the MangaDenizi PRNG.
  */
 async function untileImage(
     buffer,
@@ -312,26 +433,16 @@ async function untileImage(
     grid
 ) {
 
-    const parsedGrid =
+    const sharp =
+        require("sharp");
+
+    const gridSize =
         parseGrid(grid);
 
-    if (!parsedGrid) {
+    if (!gridSize) {
+
         throw new Error(
             "Invalid MangaDenizi tile grid."
-        );
-    }
-
-    const {
-        columns,
-        rows
-    } = parsedGrid;
-
-    if (
-        columns <= 0 ||
-        rows <= 0
-    ) {
-        throw new Error(
-            "Invalid MangaDenizi tile dimensions."
         );
     }
 
@@ -349,13 +460,43 @@ async function untileImage(
         !width ||
         !height
     ) {
+
         throw new Error(
             "Could not determine image dimensions."
         );
     }
 
     /*
-     * MangaDenizi's current salts.
+     * Do not allow the grid to exceed
+     * the actual image dimensions.
+     */
+    const actualGrid =
+        Math.max(
+            1,
+            Math.min(
+                Math.floor(gridSize),
+                width,
+                height
+            )
+        );
+
+    /*
+     * Split image into MangaDenizi regions.
+     */
+    const columnRegions =
+        splitDimension(
+            width,
+            actualGrid
+        );
+
+    const rowRegions =
+        splitDimension(
+            height,
+            actualGrid
+        );
+
+    /*
+     * MangaDenizi salts.
      */
     const COLUMN_SALT =
         0x85EBCA6B;
@@ -363,149 +504,128 @@ async function untileImage(
     const ROW_SALT =
         0x9E3779B9;
 
-    const columnShuffle =
+    /*
+     * Generate the exact column/row shuffles.
+     */
+    const shuffledColumns =
         makeShuffle(
-            columns,
+            actualGrid,
             seed,
             COLUMN_SALT
         );
 
-    const rowShuffle =
+    const shuffledRows =
         makeShuffle(
-            rows,
+            actualGrid,
             seed,
             ROW_SALT
         );
 
-    /*
-     * Extract all scrambled regions.
-     */
-    const tiles = [];
+    const composites = [];
 
+    /*
+     * Extract every scrambled tile.
+     */
     for (
-        let sourceRow = 0;
-        sourceRow < rows;
-        sourceRow++
+        let row = 0;
+        row < actualGrid;
+        row++
     ) {
 
-        const sourceTop =
-            Math.floor(
-                sourceRow *
-                height /
-                rows
-            );
+        const sourceY =
+            rowRegions[row];
 
-        const sourceBottom =
-            Math.floor(
-                (sourceRow + 1) *
-                height /
-                rows
-            );
-
-        const sourceHeight =
-            sourceBottom -
-            sourceTop;
+        const destinationY =
+            rowRegions[
+                shuffledRows[row]
+            ];
 
         for (
-            let sourceColumn = 0;
-            sourceColumn < columns;
-            sourceColumn++
+            let column = 0;
+            column < actualGrid;
+            column++
         ) {
 
-            const sourceLeft =
-                Math.floor(
-                    sourceColumn *
-                    width /
-                    columns
-                );
+            const sourceX =
+                columnRegions[column];
 
-            const sourceRight =
-                Math.floor(
-                    (sourceColumn + 1) *
-                    width /
-                    columns
-                );
+            const destinationX =
+                columnRegions[
+                    shuffledColumns[column]
+                ];
 
-            const sourceWidth =
-                sourceRight -
-                sourceLeft;
-
-            if (
-                sourceWidth <= 0 ||
-                sourceHeight <= 0
-            ) {
-                continue;
-            }
-
-            const tile =
+            /*
+             * Extract source tile.
+             */
+            let tile =
                 await sharp(buffer)
                     .extract({
-                        left: sourceLeft,
-                        top: sourceTop,
-                        width: sourceWidth,
-                        height: sourceHeight
+                        left:
+                            sourceX.offset,
+
+                        top:
+                            sourceY.offset,
+
+                        width:
+                            sourceX.length,
+
+                        height:
+                            sourceY.length
                     })
                     .png()
                     .toBuffer();
 
-            tiles.push({
-                sourceRow,
-                sourceColumn,
-                buffer: tile,
-                width: sourceWidth,
-                height: sourceHeight
+            /*
+             * MangaDenizi's browser implementation
+             * draws each tile into the destination
+             * rectangle, meaning dimensions may need
+             * to be scaled.
+             */
+            if (
+                sourceX.length !==
+                    destinationX.length ||
+                sourceY.length !==
+                    destinationY.length
+            ) {
+
+                tile =
+                    await sharp(tile)
+                        .resize({
+                            width:
+                                destinationX.length,
+
+                            height:
+                                destinationY.length,
+
+                            fit:
+                                "fill"
+                        })
+                        .png()
+                        .toBuffer();
+            }
+
+            composites.push({
+                input: tile,
+
+                left:
+                    destinationX.offset,
+
+                top:
+                    destinationY.offset
             });
         }
     }
 
     /*
-     * Rebuild the image.
-     *
-     * The shuffled sequence tells us where each
-     * scrambled source region originally belongs.
+     * Rebuild final image.
      */
-    const composites = [];
-
-    for (
-        const tile of tiles
-    ) {
-
-        const destinationColumn =
-            columnShuffle[
-                tile.sourceColumn
-            ];
-
-        const destinationRow =
-            rowShuffle[
-                tile.sourceRow
-            ];
-
-        const left =
-            Math.floor(
-                destinationColumn *
-                width /
-                columns
-            );
-
-        const top =
-            Math.floor(
-                destinationRow *
-                height /
-                rows
-            );
-
-        composites.push({
-            input: tile.buffer,
-            left,
-            top
-        });
-    }
-
     return sharp({
         create: {
             width,
             height,
+
             channels: 4,
+
             background: {
                 r: 255,
                 g: 255,
@@ -514,19 +634,21 @@ async function untileImage(
             }
         }
     })
-        .composite(composites)
+        .composite(
+            composites
+        )
         .png()
         .toBuffer();
 }
 
 /*
- * Process one MangaDenizi reader image.
+ * Process one MangaDenizi image.
  *
- * Handles:
+ * Supports:
  *
- *   xor
- *   tiled-v1
- *   normal/unscrambled
+ *     xor
+ *     tiled-v1
+ *     normal
  */
 async function processImage(
     imageUrl,
@@ -534,14 +656,13 @@ async function processImage(
 ) {
 
     /*
-     * Sharp is intentionally available here.
-     * The index.js calls:
-     *
-     * source.processImage(url, scramble)
+     * Sharp intentionally loaded here.
      */
-    const sharp = require("sharp");
+    const sharp =
+        require("sharp");
 
     if (!imageUrl) {
+
         throw new Error(
             "Missing MangaDenizi image URL."
         );
@@ -595,10 +716,7 @@ async function processImage(
         response.headers || {};
 
     /*
-     * Payload can contain the scramble
-     * information.
-     *
-     * Response headers are fallback values.
+     * Determine scramble method.
      */
     const method =
         String(
@@ -610,9 +728,11 @@ async function processImage(
             .toLowerCase();
 
     /*
-     * XOR
+     * XOR scrambling.
      */
-    if (method === "xor") {
+    if (
+        method === "xor"
+    ) {
 
         const key =
             scramble.key ??
@@ -627,13 +747,14 @@ async function processImage(
 
         return {
             buffer,
+
             contentType:
                 "image/png"
         };
     }
 
     /*
-     * Tiled-v1
+     * Tiled-v1 scrambling.
      */
     if (
         method === "tiled-v1" ||
@@ -646,28 +767,30 @@ async function processImage(
                 headers["x-scramble-seed"]
             );
 
+        /*
+         * MangaDenizi normally supplies grid
+         * inside the reader payload.
+         *
+         * Header is only a fallback.
+         */
         const grid =
             parseGrid(
-                scramble.grid ||
-                (
-                    headers[
-                        "x-scramble-grid"
-                    ]
-                    ? headers[
-                        "x-scramble-grid"
-                    ]
-                    : null
-                )
+                scramble.grid ??
+                headers["x-scramble-grid"]
             );
 
-        if (seed === null) {
+        if (
+            seed === null
+        ) {
 
             throw new Error(
                 "MangaDenizi tiled-v1 image is missing its scramble seed."
             );
         }
 
-        if (!grid) {
+        if (
+            !grid
+        ) {
 
             throw new Error(
                 "MangaDenizi tiled-v1 image is missing its scramble grid."
@@ -683,14 +806,14 @@ async function processImage(
 
         return {
             buffer,
+
             contentType:
                 "image/png"
         };
     }
 
     /*
-     * If MangaDenizi didn't specify a scramble
-     * method, return the original image.
+     * No scrambling.
      */
     let contentType =
         headers["content-type"];
@@ -709,26 +832,37 @@ async function processImage(
                     .metadata();
 
             if (
-                metadata.format === "webp"
+                metadata.format ===
+                "webp"
             ) {
+
                 contentType =
                     "image/webp";
+
             } else if (
-                metadata.format === "jpeg"
+                metadata.format ===
+                "jpeg"
             ) {
+
                 contentType =
                     "image/jpeg";
+
             } else if (
-                metadata.format === "png"
+                metadata.format ===
+                "png"
             ) {
+
                 contentType =
                     "image/png";
+
             } else {
+
                 contentType =
                     "image/png";
             }
 
         } catch {
+
             contentType =
                 "image/png";
         }
@@ -741,10 +875,7 @@ async function processImage(
 }
 
 /*
- * Find a MangaDenizi manga.
- *
- * First tries the paginated public API.
- * Then falls back to a direct slug.
+ * Find MangaDenizi manga.
  */
 async function findManga(
     mangaName
@@ -758,7 +889,7 @@ async function findManga(
     }
 
     /*
-     * Try several pages of the public manga API.
+     * Search public MangaDenizi pages.
      */
     for (
         let page = 1;
@@ -780,7 +911,9 @@ async function findManga(
                 [];
 
             if (
-                !Array.isArray(mangas)
+                !Array.isArray(
+                    mangas
+                )
             ) {
                 continue;
             }
@@ -809,9 +942,12 @@ async function findManga(
                     normalize(slug);
 
                 if (
-                    normalizedTitle === wanted ||
-                    normalizedSlug === wanted
+                    normalizedTitle ===
+                        wanted ||
+                    normalizedSlug ===
+                        wanted
                 ) {
+
                     return {
                         title,
                         slug
@@ -832,10 +968,14 @@ async function findManga(
      */
     const possibleSlugs = [
         slugify(mangaName),
+
         String(mangaName)
             .trim()
             .toLowerCase()
-            .replace(/\s+/g, "-")
+            .replace(
+                /\s+/g,
+                "-"
+            )
     ];
 
     for (
@@ -871,7 +1011,7 @@ async function findManga(
             }
 
         } catch {
-            // Try next possible slug.
+            // Try next slug.
         }
     }
 
@@ -879,7 +1019,7 @@ async function findManga(
 }
 
 /*
- * Get chapter list.
+ * Get manga chapters.
  */
 async function getChapters(
     manga
@@ -895,7 +1035,9 @@ async function getChapters(
         [];
 
     if (
-        !Array.isArray(chapters)
+        !Array.isArray(
+            chapters
+        )
     ) {
         return [];
     }
@@ -904,7 +1046,7 @@ async function getChapters(
 }
 
 /*
- * Compare chapter numbers safely.
+ * Match requested chapter.
  */
 function chapterMatches(
     chapter,
@@ -928,6 +1070,7 @@ function chapterMatches(
                 .trim() ===
             requestedText
         ) {
+
             return true;
         }
 
@@ -942,6 +1085,7 @@ function chapterMatches(
             Number.isFinite(b) &&
             a === b
         ) {
+
             return true;
         }
     }
@@ -965,7 +1109,9 @@ function chapterMatches(
         Number(requested);
 
     if (
-        Number.isFinite(requestedNumber)
+        Number.isFinite(
+            requestedNumber
+        )
     ) {
 
         const matches =
@@ -976,12 +1122,15 @@ function chapterMatches(
         if (matches) {
 
             const found =
-                Number(matches[1]);
+                Number(
+                    matches[1]
+                );
 
             if (
                 found ===
                 requestedNumber
             ) {
+
                 return true;
             }
         }
@@ -991,7 +1140,7 @@ function chapterMatches(
 }
 
 /*
- * Get the reader payload.
+ * Get MangaDenizi reader payload.
  */
 async function getReaderPayload(
     manga,
@@ -1014,8 +1163,12 @@ async function getReaderPayload(
  */
 module.exports = {
 
-    name: SOURCE_NAME,
+    name:
+        SOURCE_NAME,
 
+    /*
+     * Fetch chapter.
+     */
     async getChapter(
         mangaName,
         chapterNumber
@@ -1025,6 +1178,9 @@ module.exports = {
             `[${SOURCE_NAME}] Searching: ${mangaName} chapter ${chapterNumber}`
         );
 
+        /*
+         * Find manga.
+         */
         const manga =
             await findManga(
                 mangaName
@@ -1041,6 +1197,9 @@ module.exports = {
             `[${SOURCE_NAME}] Found manga: ${manga.title} (${manga.slug})`
         );
 
+        /*
+         * Fetch chapters.
+         */
         const chapters =
             await getChapters(
                 manga
@@ -1055,6 +1214,9 @@ module.exports = {
             );
         }
 
+        /*
+         * Find requested chapter.
+         */
         const chapter =
             chapters.find(
                 item =>
@@ -1077,6 +1239,9 @@ module.exports = {
             `(${chapter.slug})`
         );
 
+        /*
+         * Get reader payload.
+         */
         const payload =
             await getReaderPayload(
                 manga,
@@ -1090,7 +1255,9 @@ module.exports = {
                 ? payload.pages
                 : [];
 
-        if (!pages.length) {
+        if (
+            !pages.length
+        ) {
 
             throw new Error(
                 `MangaDenizi returned no reader pages for "${manga.title}" chapter ${chapterNumber}.`
@@ -1098,16 +1265,15 @@ module.exports = {
         }
 
         /*
-         * Keep scramble information attached to
-         * every page. index.js will turn these
-         * objects into temporary proxy URLs.
+         * Preserve image URL + scramble data.
          */
         const normalizedPages =
             pages
                 .map(page => {
 
                     if (
-                        typeof page === "string"
+                        typeof page ===
+                        "string"
                     ) {
 
                         return {
@@ -1144,6 +1310,10 @@ module.exports = {
             );
         }
 
+        /*
+         * Return in the format expected
+         * by the API index.js.
+         */
         return {
 
             title:
@@ -1166,7 +1336,7 @@ module.exports = {
     },
 
     /*
-     * Used by the API's MangaDenizi image proxy.
+     * Used by index.js image proxy.
      */
     processImage
 };
