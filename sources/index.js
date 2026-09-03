@@ -1,5 +1,5 @@
-const ManhuaPlus = require("./manhuaplus");
+const MangaHub = require("./mangahub");
 
 module.exports = [
-    ManhuaPlus
+    MangaHub
 ];
