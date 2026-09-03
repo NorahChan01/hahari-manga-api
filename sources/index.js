@@ -1,5 +1,5 @@
-const MangaDNA = require("./mangadna");
+const NHentai = require("./nhentai");
 
 module.exports = [
-    MangaDNA
+    NHentai
 ];
