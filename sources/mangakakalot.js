@@ -2,6 +2,14 @@ const puppeteer = require("puppeteer");
 
 const BASE_URL = "https://www.mangakakalot.gg";
 
+/*
+ * IMPORTANT:
+ * Must match the Render build command.
+ */
+const CACHE_DIR =
+    process.env.PUPPETEER_CACHE_DIR ||
+    "/opt/render/project/src/.puppeteer-cache";
+
 function normalizeChapter(chapter) {
     return String(chapter || "")
         .trim()
@@ -47,7 +55,7 @@ function isMangaImage(url) {
 
 function sortPages(pages) {
     return pages.sort((a, b) => {
-        function getNumber(url) {
+        const getNumber = url => {
             const match = url.match(
                 /(?:\/|_|-)(\d+)\.(?:webp|jpg|jpeg|png)(?:[?#].*)?$/i
             );
@@ -55,7 +63,7 @@ function sortPages(pages) {
             return match
                 ? Number(match[1])
                 : Number.MAX_SAFE_INTEGER;
-        }
+        };
 
         return getNumber(a) - getNumber(b);
     });
@@ -81,27 +89,30 @@ async function getChapter(title, chapter) {
 
     try {
         /*
-         * IMPORTANT:
-         * Let Puppeteer determine the executable.
-         *
-         * This avoids hard-coding a Chrome version.
+         * Force Puppeteer to use the SAME cache directory
+         * used during Render's build.
          */
+        process.env.PUPPETEER_CACHE_DIR = CACHE_DIR;
+
         const executablePath =
             puppeteer.executablePath();
 
         console.log(
-            `[MangaKakalot] Puppeteer executable: ${executablePath}`
+            `[MangaKakalot] Cache: ${CACHE_DIR}`
+        );
+
+        console.log(
+            `[MangaKakalot] Chrome: ${executablePath}`
         );
 
         if (!executablePath) {
             throw new Error(
-                "Puppeteer could not determine the Chrome executable."
+                "Puppeteer could not determine Chrome executable."
             );
         }
 
         browser = await puppeteer.launch({
             headless: true,
-
             executablePath,
 
             args: [
@@ -118,7 +129,8 @@ async function getChapter(title, chapter) {
             ]
         });
 
-        const page = await browser.newPage();
+        const page =
+            await browser.newPage();
 
         await page.setViewport({
             width: 1366,
@@ -129,7 +141,7 @@ async function getChapter(title, chapter) {
         await page.setUserAgent(
             "Mozilla/5.0 (X11; Linux x86_64) " +
             "AppleWebKit/537.36 (KHTML, like Gecko) " +
-            "Chrome/139.0.0.0 Safari/537.36"
+            "Chrome/140.0.0.0 Safari/537.36"
         );
 
         await page.setExtraHTTPHeaders({
@@ -137,12 +149,13 @@ async function getChapter(title, chapter) {
         });
 
         /*
-         * Don't block images.
+         * Keep images.
          */
         await page.setRequestInterception(true);
 
         page.on("request", request => {
-            const type = request.resourceType();
+            const type =
+                request.resourceType();
 
             if (
                 type === "font" ||
@@ -159,70 +172,70 @@ async function getChapter(title, chapter) {
             `[MangaKakalot] Opening ${url}`
         );
 
-        const response = await page.goto(url, {
-            waitUntil: "domcontentloaded",
-            timeout: 60000
-        });
-
-        const status =
-            response
-                ? response.status()
-                : "unknown";
+        const response =
+            await page.goto(url, {
+                waitUntil: "domcontentloaded",
+                timeout: 60000
+            });
 
         console.log(
-            `[MangaKakalot] HTTP status: ${status}`
+            `[MangaKakalot] HTTP status: ${
+                response
+                    ? response.status()
+                    : "unknown"
+            }`
         );
 
         /*
-         * Give JavaScript / anti-bot systems time to finish.
+         * Allow JavaScript / Cloudflare to finish.
          */
         await new Promise(resolve =>
             setTimeout(resolve, 6000)
         );
 
         /*
-         * Scroll the entire reader.
-         *
-         * This is important because many manga readers
-         * lazy-load pages only after scrolling.
+         * Trigger lazy-loaded reader images.
          */
         await page.evaluate(async () => {
             await new Promise(resolve => {
                 let lastHeight = 0;
-                let stableCount = 0;
-                let safety = 0;
+                let stable = 0;
+                let attempts = 0;
 
-                const timer = setInterval(() => {
-                    window.scrollBy(
-                        0,
-                        Math.max(
-                            window.innerHeight * 0.8,
-                            700
-                        )
-                    );
+                const timer =
+                    setInterval(() => {
+                        window.scrollBy(
+                            0,
+                            Math.max(
+                                window.innerHeight * 0.8,
+                                700
+                            )
+                        );
 
-                    const height =
-                        document.body
-                            ? document.body.scrollHeight
-                            : 0;
+                        const height =
+                            document.body
+                                ? document.body.scrollHeight
+                                : 0;
 
-                    if (height === lastHeight) {
-                        stableCount++;
-                    } else {
-                        stableCount = 0;
-                        lastHeight = height;
-                    }
+                        if (
+                            height === lastHeight
+                        ) {
+                            stable++;
+                        } else {
+                            stable = 0;
+                            lastHeight = height;
+                        }
 
-                    safety++;
+                        attempts++;
 
-                    if (
-                        stableCount >= 5 ||
-                        safety >= 100
-                    ) {
-                        clearInterval(timer);
-                        resolve();
-                    }
-                }, 300);
+                        if (
+                            stable >= 5 ||
+                            attempts >= 100
+                        ) {
+                            clearInterval(timer);
+                            resolve();
+                        }
+                    }, 300);
             });
         });
 
@@ -231,140 +244,129 @@ async function getChapter(title, chapter) {
         );
 
         /*
-         * Extract every possible image URL.
+         * Extract image URLs.
          */
-        const images = await page.evaluate(() => {
-            const found = new Set();
+        const images =
+            await page.evaluate(() => {
+                const found = new Set();
 
-            function add(value) {
-                if (!value) return;
+                function add(value) {
+                    if (!value) return;
 
-                try {
-                    const absolute =
-                        new URL(
-                            value,
-                            location.href
-                        ).href;
+                    try {
+                        found.add(
+                            new URL(
+                                value,
+                                location.href
+                            ).href
+                        );
+                    } catch {}
+                }
 
-                    found.add(absolute);
-                } catch {}
-            }
+                document
+                    .querySelectorAll("img")
+                    .forEach(img => {
+                        add(img.src);
+                        add(img.currentSrc);
 
-            /*
-             * Normal <img> elements.
-             */
-            document
-                .querySelectorAll("img")
-                .forEach(img => {
-                    add(img.src);
-                    add(img.currentSrc);
+                        add(
+                            img.getAttribute("src")
+                        );
 
-                    add(
-                        img.getAttribute("src")
-                    );
+                        add(
+                            img.getAttribute("data-src")
+                        );
 
-                    add(
-                        img.getAttribute("data-src")
-                    );
+                        add(
+                            img.getAttribute(
+                                "data-original"
+                            )
+                        );
 
-                    add(
-                        img.getAttribute("data-original")
-                    );
+                        add(
+                            img.getAttribute(
+                                "data-lazy-src"
+                            )
+                        );
 
-                    add(
-                        img.getAttribute("data-lazy-src")
-                    );
+                        add(
+                            img.getAttribute(
+                                "data-url"
+                            )
+                        );
 
-                    add(
-                        img.getAttribute("data-url")
-                    );
+                        add(
+                            img.getAttribute(
+                                "data-image"
+                            )
+                        );
 
-                    add(
-                        img.getAttribute("data-image")
-                    );
+                        add(
+                            img.getAttribute(
+                                "data-lazy"
+                            )
+                        );
 
-                    add(
-                        img.getAttribute("data-lazy")
-                    );
+                        const srcset =
+                            img.getAttribute(
+                                "srcset"
+                            );
 
-                    /*
-                     * srcset
-                     */
-                    const srcset =
-                        img.getAttribute("srcset");
+                        if (srcset) {
+                            srcset
+                                .split(",")
+                                .forEach(item => {
+                                    add(
+                                        item
+                                            .trim()
+                                            .split(
+                                                /\s+/
+                                            )[0]
+                                    );
+                                });
+                        }
+                    });
 
-                    if (srcset) {
-                        srcset
-                            .split(",")
-                            .forEach(item => {
-                                const value =
-                                    item
-                                        .trim()
-                                        .split(/\s+/)[0];
+                document
+                    .querySelectorAll("source")
+                    .forEach(source => {
+                        add(
+                            source.getAttribute(
+                                "src"
+                            )
+                        );
 
-                                add(value);
-                            });
-                    }
-                });
+                        add(
+                            source.getAttribute(
+                                "data-src"
+                            )
+                        );
 
-            /*
-             * <source> elements.
-             */
-            document
-                .querySelectorAll("source")
-                .forEach(source => {
-                    add(
-                        source.getAttribute("src")
-                    );
+                        const srcset =
+                            source.getAttribute(
+                                "srcset"
+                            );
 
-                    add(
-                        source.getAttribute("data-src")
-                    );
+                        if (srcset) {
+                            srcset
+                                .split(",")
+                                .forEach(item => {
+                                    add(
+                                        item
+                                            .trim()
+                                            .split(
+                                                /\s+/
+                                            )[0]
+                                    );
+                                });
+                        }
+                    });
 
-                    const srcset =
-                        source.getAttribute("srcset");
-
-                    if (srcset) {
-                        srcset
-                            .split(",")
-                            .forEach(item => {
-                                const value =
-                                    item
-                                        .trim()
-                                        .split(/\s+/)[0];
-
-                                add(value);
-                            });
-                    }
-                });
-
-            /*
-             * Some readers store image URLs in
-             * lazy-loading attributes.
-             */
-            document
-                .querySelectorAll(
-                    "[data-src], [data-original], [data-lazy-src]"
-                )
-                .forEach(element => {
-                    add(
-                        element.getAttribute("data-src")
-                    );
-
-                    add(
-                        element.getAttribute("data-original")
-                    );
-
-                    add(
-                        element.getAttribute("data-lazy-src")
-                    );
-                });
-
-            return Array.from(found);
-        });
+                return Array.from(found);
+            });
 
         /*
-         * Detect anti-bot pages.
+         * Detect Cloudflare / anti-bot page.
          */
         const pageText =
             await page.evaluate(() =>
@@ -377,21 +379,21 @@ async function getChapter(title, chapter) {
             /checking your browser|verify you are human|just a moment|attention required|cloudflare/i
                 .test(pageText);
 
-        /*
-         * Filter manga pages.
-         */
-        const pages = sortPages(
-            [...new Set(
-                images.filter(isMangaImage)
-            )]
-        );
+        const pages =
+            sortPages(
+                [...new Set(
+                    images.filter(
+                        isMangaImage
+                    )
+                )]
+            );
 
         console.log(
             `[MangaKakalot] Images discovered: ${images.length}`
         );
 
         console.log(
-            `[MangaKakalot] Valid manga pages: ${pages.length}`
+            `[MangaKakalot] Valid pages: ${pages.length}`
         );
 
         if (
@@ -410,7 +412,7 @@ async function getChapter(title, chapter) {
         }
 
         /*
-         * Final deduplication.
+         * Final URL deduplication.
          */
         const uniquePages = [];
         const seen = new Set();
@@ -425,9 +427,6 @@ async function getChapter(title, chapter) {
             }
         }
 
-        /*
-         * Re-sort after deduplication.
-         */
         sortPages(uniquePages);
 
         console.log(
