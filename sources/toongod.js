@@ -35,6 +35,14 @@ return null;
 }
 }
 
+function unique(array) {
+return [...new Set(
+array
+.filter(Boolean)
+.map(x => x.trim())
+)];
+}
+
 function sameChapter(a, b) {
 if (a == null) return false;
 
@@ -75,14 +83,6 @@ return null;
 
 }
 
-function unique(array) {
-return [...new Set(
-array
-.filter(Boolean)
-.map(x => x.trim())
-)];
-}
-
 function isImage(url) {
 if (!url) return false;
 
@@ -107,7 +107,7 @@ return (
 }
 
 function getImageFromElement($, el) {
-const attrs = [
+const attributes = [
 "data-src",
 "data-lazy-src",
 "data-original",
@@ -115,10 +115,13 @@ const attrs = [
 "src"
 ];
 
-for (const attr of attrs) {
-    const value = $(el).attr(attr);
+for (const attribute of attributes) {
+    const value = $(el).attr(attribute);
 
-    if (value && !value.startsWith("data:image")) {
+    if (
+        value &&
+        !value.startsWith("data:image")
+    ) {
         return value;
     }
 }
@@ -127,210 +130,182 @@ return null;
 
 }
 
-/*
+async function searchManga(title) {
+const wanted = normalize(title);
 
-* Search ToonGod.
+if (!wanted) {
+    return null;
+}
 
-* 
+const searchUrls = [
+    `${BASE_URL}/?s=${encodeURIComponent(title)}`,
+    `${BASE_URL}/search/${encodeURIComponent(title)}/`
+];
 
-* ToonGod uses /webtoon/<slug>/ pages.
-  */
-  async function searchManga(title) {
-  const wanted = normalize(title);
-  
-  if (!wanted) return null;
-  
-  const searchUrls = [
-  "${BASE_URL}/?s=${encodeURIComponent(title)}",
-  "${BASE_URL}/search/${encodeURIComponent(title)}/"
-  ];
-  
-  const candidates = [];
-  
-  for (const searchUrl of searchUrls) {
-  try {
-  const response =
-  await client.get(searchUrl);
-  
-       const $ =
-         cheerio.load(response.data);
+const candidates = [];
 
-     $("a[href*='/webtoon/']").each((_, el) => {
-         const href =
-             $(el).attr("href");
+for (const searchUrl of searchUrls) {
+    try {
+        const response =
+            await client.get(searchUrl);
 
-         if (!href) return;
+        const $ =
+            cheerio.load(response.data);
 
-         const text =
-             $(el).attr("title") ||
-             $(el).text().trim();
+        $("a[href*='/webtoon/']").each((_, el) => {
+            const href =
+                $(el).attr("href");
 
-         if (!text) return;
+            if (!href) return;
 
-         const normalized =
-             normalize(text);
+            const text =
+                $(el).attr("title") ||
+                $(el).text().trim();
 
-         let score = 0;
+            if (!text) return;
 
-         if (normalized === wanted) {
-             score = 100;
-         } else if (
-             normalized.includes(wanted)
-         ) {
-             score = 85;
-         } else if (
-             wanted.includes(normalized)
-         ) {
-             score = 75;
-         } else {
-             const wantedWords =
-                 wanted.split(" ");
+            const name =
+                text
+                    .replace(/\s+/g, " ")
+                    .trim();
 
-             const candidateWords =
-                 normalized.split(" ");
+            const normalized =
+                normalize(name);
 
-             const common =
-                 wantedWords.filter(
-                     word =>
-                         word.length > 2 &&
-                         candidateWords.includes(word)
-                 ).length;
+            let score = 0;
 
-             score =
-                 common * 10;
-         }
+            if (normalized === wanted) {
+                score = 100;
+            } else if (
+                normalized.includes(wanted)
+            ) {
+                score = 85;
+            } else if (
+                wanted.includes(normalized)
+            ) {
+                score = 75;
+            } else {
+                const wantedWords =
+                    wanted.split(" ");
 
-         candidates.push({
-             title: text
-                 .replace(/\s+/g, " ")
-                 .trim(),
+                const candidateWords =
+                    normalized.split(" ");
 
-             url:
-                 absolute(
-                     href
-                 ),
+                const common =
+                    wantedWords.filter(
+                        word =>
+                            word.length > 2 &&
+                            candidateWords.includes(word)
+                    ).length;
 
-             score
-         });
-     });
+                score =
+                    common * 10;
+            }
 
- } catch (error) {
-     console.log(
-         `[ToonGod] Search failed: ${error.message}`
-     );
- }
-  
-  }
-  
-  const uniqueCandidates =
-  candidates.filter(
-  (item, index, array) =>
-  item.url &&
-  array.findIndex(
-  x => x.url === item.url
-  ) === index
-  );
-  
-  uniqueCandidates.sort(
-  (a, b) => b.score - a.score
-  );
-  
-  return uniqueCandidates[0] || null;
-  }
+            candidates.push({
+                title: name,
+                url: absolute(href),
+                score
+            });
+        });
 
-/*
+    } catch (error) {
+        console.log(
+            `[ToonGod] Search failed: ${error.message}`
+        );
+    }
+}
 
-* Find the requested chapter on the
+const filtered =
+    candidates.filter(
+        (item, index, array) =>
+            item.url &&
+            array.findIndex(
+                x => x.url === item.url
+            ) === index
+    );
 
-* ToonGod webtoon page.
-  */
-  async function findChapter(manga, chapter) {
-  const response =
-  await client.get(
-  manga.url,
-  {
-  headers: {
-  Referer: BASE_URL + "/"
-  }
-  }
-  );
-  
-  const $ =
-  cheerio.load(response.data);
-  
-  let chapterUrl = null;
-  
-  $("a[href]").each((_, el) => {
-  if (chapterUrl) return;
-  
-   const href =
-     $(el).attr("href");
+filtered.sort(
+    (a, b) => b.score - a.score
+);
 
- const text =
-     $(el).text().trim();
+return filtered[0] || null;
 
- if (!href) return;
+}
 
- const combined =
-     `${text} ${href}`;
+async function findChapter(manga, chapter) {
+const response =
+await client.get(
+manga.url,
+{
+headers: {
+Referer: BASE_URL + "/"
+}
+}
+);
 
- const number =
-     extractChapterNumber(
-         combined
-     );
+const $ =
+    cheerio.load(response.data);
 
- if (
-     sameChapter(
-         number,
-         chapter
-     )
- ) {
-     chapterUrl =
-         absolute(
-             href,
-             manga.url
-         );
- }
-  
-  });
-  
-  return chapterUrl;
-  }
+let chapterUrl = null;
 
-/*
+$("a[href]").each((_, el) => {
+    if (chapterUrl) return;
 
-* Extract chapter images.
+    const href =
+        $(el).attr("href");
 
-* 
+    const text =
+        $(el).text().trim();
 
-* ToonGod commonly stores chapter pages
+    if (!href) return;
 
-* in image elements with lazy-loading attributes.
-  */
-  async function extractPages(chapterUrl) {
-  const response =
-  await client.get(
-  chapterUrl,
-  {
-  headers: {
-  Referer: chapterUrl
-  }
-  }
-  );
-  
-  const html =
-  response.data;
-  
-  const $ =
-  cheerio.load(html);
-  
-  const pages = [];
-  
-  /*
-  
-  * Reader containers first.
-    */
-    const selectors = [
+    const combined =
+        `${text} ${href}`;
+
+    const number =
+        extractChapterNumber(
+            combined
+        );
+
+    if (
+        sameChapter(
+            number,
+            chapter
+        )
+    ) {
+        chapterUrl =
+            absolute(
+                href,
+                manga.url
+            );
+    }
+});
+
+return chapterUrl;
+
+}
+
+async function extractPages(chapterUrl) {
+const response =
+await client.get(
+chapterUrl,
+{
+headers: {
+Referer: chapterUrl
+}
+}
+);
+
+const html =
+    response.data;
+
+const $ =
+    cheerio.load(html);
+
+const pages = [];
+
+const selectors = [
     ".reading-content img",
     ".chapter-content img",
     ".reading-detail img",
@@ -338,101 +313,100 @@ return null;
     ".chapter-reader img",
     ".c-tabs-item__content img",
     ".main-reading-area img"
-    ];
-  
-  for (const selector of selectors) {
-  $(selector).each((_, el) => {
-  const raw =
-  getImageFromElement(
-  $,
-  el
-  );
-  
-       const url =
-         absolute(
-             raw,
-             chapterUrl
-         );
+];
 
-     if (
-         url &&
-         isImage(url)
-     ) {
-         pages.push(url);
-     }
- });
-  
-  }
-  
-  /*
-  
-  * If the site changed its reader
-  
-  * container, inspect all images.
-    */
-    if (pages.length < 2) {
+for (const selector of selectors) {
+    $(selector).each((_, el) => {
+        const raw =
+            getImageFromElement(
+                $,
+                el
+            );
+
+        const url =
+            absolute(
+                raw,
+                chapterUrl
+            );
+
+        if (
+            url &&
+            isImage(url)
+        ) {
+            pages.push(url);
+        }
+    });
+}
+
+/*
+ * Fallback:
+ * inspect every image on the page.
+ */
+if (pages.length < 2) {
     $("img").each((_, el) => {
-    const raw =
-    getImageFromElement(
-    $,
-    el
-    );
-    
-     const url =
-     absolute(
-         raw,
-         chapterUrl
-     );
+        const raw =
+            getImageFromElement(
+                $,
+                el
+            );
 
- if (
-     url &&
-     isImage(url)
- ) {
-     pages.push(url);
- }
-    
+        const url =
+            absolute(
+                raw,
+                chapterUrl
+            );
+
+        if (
+            url &&
+            isImage(url)
+        ) {
+            pages.push(url);
+        }
     });
-    }
-  
-  /*
-  
-  * Search JavaScript for image URLs.
-    */
-    $("script").each((_, el) => {
+}
+
+/*
+ * Search inline JavaScript for image URLs.
+ *
+ * IMPORTANT:
+ * This regex is intentionally written as a
+ * JavaScript regex literal. Do not remove the
+ * surrounding /.../gi.
+ */
+$("script").each((_, el) => {
     const script =
-    $(el).html() || "";
-    
+        $(el).html() || "";
+
     const matches =
-    script.match(
-    /https?://[^"'\\s]+?.(?:jpg|jpeg|png|webp|avif)(?:?[^"'\\s]*)?/gi
-    );
-    
+        script.match(
+            /https?:\/\/[^"'\\\s]+?\.(?:jpg|jpeg|png|webp|avif)(?:\?[^"'\\\s]*)?/gi
+        );
+
     if (!matches) return;
-    
+
     for (const match of matches) {
-    const clean =
-    match
-    .replace(
-    /\u0026/g,
-    "&"
-    )
-    .replace(
-    /\//g,
-    "/"
-    );
-    
-     if (isImage(clean)) {
-     pages.push(clean);
- }
-    
+        const clean =
+            match
+                .replace(
+                    /\\u0026/g,
+                    "&"
+                )
+                .replace(
+                    /\\\//g,
+                    "/"
+                );
+
+        if (isImage(clean)) {
+            pages.push(clean);
+        }
     }
-    });
-  
-  return unique(pages);
-  }
+});
+
+return unique(pages);
+
+}
 
 module.exports = {
-
 name: "ToonGod",
 
 async getChapter(
